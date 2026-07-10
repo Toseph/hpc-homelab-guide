@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="description" content="A readable homelab guide for practicing senior Linux, HPC, Proxmox, SLURM, Kubernetes, storage, identity, and boot security skills.">
+    <title>Senior Linux & HPC Homelab Study Guide</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --bg-deep: #0b1120;
+            --panel: #111827;
+            --panel-soft: #1e293b;
+            --text-main: #f8fafc;
+            --text-body: #dbe4f0;
+            --text-muted: #94a3b8;
+            --accent: #f97316;
+            --accent-soft: #fb923c;
+            --accent-green: #22c55e;
+            --accent-cyan: #38bdf8;
+            --border: #334155;
+            --code-bg: #07111f;
+            --shadow: rgba(0, 0, 0, 0.32);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            min-height: 100vh;
+            margin: 0;
+            padding: 1.5rem 1rem 3rem;
+            background:
+                radial-gradient(circle at top right, rgba(249, 115, 22, 0.08), transparent 34rem),
+                linear-gradient(180deg, var(--bg-color), var(--bg-deep));
+            color: var(--text-body);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.7;
+        }
+
+        a {
+            color: var(--accent-cyan);
+            text-decoration-thickness: 1px;
+            text-underline-offset: 0.18em;
+        }
+
+        a:hover,
+        a:focus-visible {
+            color: var(--accent-soft);
+        }
+
+        .container {
+            width: min(100%, 1180px);
+            margin: 0 auto;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            flex-wrap: wrap;
+            padding: 0.7rem 0;
+            margin-bottom: 1.6rem;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-muted);
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            font-size: 0.75rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .status-online {
+            color: var(--accent-green);
+        }
+
+        header {
+            padding-bottom: 2rem;
+            margin-bottom: 2rem;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .logo-row {
+            display: flex;
+            align-items: center;
+            gap: 0.9rem;
+            color: var(--accent);
+        }
+
+        .logo-mark {
+            display: grid;
+            place-items: center;
+            width: 3.25rem;
+            height: 3.25rem;
+            border: 2px solid var(--accent);
+            border-radius: 0.65rem;
+            background: rgba(249, 115, 22, 0.08);
+            box-shadow: inset 0 0 0 1px rgba(249, 115, 22, 0.12);
+            font-family: "SFMono-Regular", Consolas, monospace;
+            font-size: 1rem;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+        }
+
+        h1 {
+            margin: 0;
+            color: var(--text-main);
+            font-size: clamp(2rem, 7vw, 3.35rem);
+            line-height: 1.02;
+            letter-spacing: 0;
+        }
+
+        .tagline {
+            max-width: 800px;
+            margin-top: 1.2rem;
+            color: var(--text-main);
+            font-size: clamp(1.05rem, 3vw, 1.28rem);
+            font-weight: 650;
+            line-height: 1.5;
+        }
+
+        .tagline span {
+            color: var(--accent-green);
+        }
+
+        .header-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.8rem;
+            margin-top: 1.45rem;
+        }
+
+        .action-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 2.7rem;
+            padding: 0.65rem 1.15rem;
+            border: 1px solid var(--border);
+            border-radius: 0.45rem;
+            background: var(--bg-color);
+            color: var(--text-main);
+            cursor: pointer;
+            font-weight: 700;
+            text-decoration: none;
+            transition:
+                border-color 0.18s ease,
+                color 0.18s ease,
+                transform 0.18s ease,
+                background 0.18s ease;
+        }
+
+        .action-link:hover,
+        .action-link:focus-visible {
+            border-color: var(--accent);
+            color: var(--accent-soft);
+            transform: translateY(-1px);
+            outline: none;
+        }
+
+        .action-link.primary {
+            border-color: var(--accent);
+            background: var(--accent);
+            color: #111827;
+        }
+
+        .action-link.primary:hover,
+        .action-link.primary:focus-visible {
+            background: var(--accent-soft);
+            color: #111827;
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) 260px;
+            gap: 2rem;
+            align-items: start;
+        }
+
+        .guide-shell {
+            min-width: 0;
+            padding: clamp(1.2rem, 4vw, 2.25rem);
+            border: 1px solid var(--border);
+            border-radius: 0.8rem;
+            background: rgba(17, 24, 39, 0.9);
+            box-shadow: 0 1rem 2.8rem var(--shadow);
+        }
+
+        .guide {
+            max-width: 78ch;
+            margin: 0 auto;
+        }
+
+        .guide > *:first-child {
+            margin-top: 0;
+        }
+
+        .guide h1,
+        .guide h2,
+        .guide h3,
+        .guide h4 {
+            color: var(--text-main);
+            line-height: 1.25;
+            letter-spacing: 0;
+        }
+
+        .guide h1 {
+            margin: 0 0 1rem;
+            font-size: clamp(2rem, 5vw, 3rem);
+        }
+
+        .guide h2 {
+            margin: 2.8rem 0 0.9rem;
+            padding-top: 0.35rem;
+            border-top: 1px solid rgba(51, 65, 85, 0.75);
+            font-size: clamp(1.45rem, 3vw, 2rem);
+        }
+
+        .guide h3 {
+            margin: 2rem 0 0.7rem;
+            color: var(--accent-soft);
+            font-size: 1.18rem;
+        }
+
+        .guide h4 {
+            margin: 1.6rem 0 0.55rem;
+            color: var(--accent-green);
+            font-size: 1rem;
+        }
+
+        .guide p,
+        .guide li {
+            font-size: 1.02rem;
+        }
+
+        .guide p {
+            margin: 1rem 0;
+        }
+
+        .guide ul,
+        .guide ol {
+            padding-left: 1.4rem;
+            margin: 0.85rem 0 1.15rem;
+        }
+
+        .guide li + li {
+            margin-top: 0.45rem;
+        }
+
+        .guide strong {
+            color: var(--text-main);
+        }
+
+        .guide hr {
+            height: 1px;
+            margin: 2.1rem 0;
+            border: 0;
+            background: linear-gradient(90deg, transparent, var(--border), transparent);
+        }
+
+        .guide table {
+            display: block;
+            width: 100%;
+            margin: 1.15rem 0 1.4rem;
+            overflow-x: auto;
+            border-collapse: collapse;
+            border: 1px solid var(--border);
+            border-radius: 0.55rem;
+            background: rgba(15, 23, 42, 0.75);
+        }
+
+        .guide th,
+        .guide td {
+            min-width: 9rem;
+            padding: 0.75rem 0.85rem;
+            border-bottom: 1px solid rgba(51, 65, 85, 0.7);
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .guide th {
+            color: var(--accent-soft);
+            font-size: 0.78rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .guide tr:last-child td {
+            border-bottom: 0;
+        }
+
+        .guide code {
+            border: 1px solid rgba(56, 189, 248, 0.15);
+            border-radius: 0.28rem;
+            background: var(--code-bg);
+            color: #a7f3d0;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            font-size: 0.92em;
+            padding: 0.1rem 0.32rem;
+        }
+
+        .guide pre {
+            margin: 1.15rem 0 1.45rem;
+            padding: 1rem;
+            overflow-x: auto;
+            border: 1px solid rgba(56, 189, 248, 0.16);
+            border-radius: 0.55rem;
+            background: var(--code-bg);
+            box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.55);
+        }
+
+        .guide pre code {
+            display: block;
+            border: 0;
+            background: transparent;
+            color: #d1fae5;
+            padding: 0;
+            white-space: pre;
+        }
+
+        .guide blockquote {
+            margin: 1.25rem 0;
+            padding: 0.05rem 1rem;
+            border-left: 4px solid var(--accent);
+            color: var(--text-muted);
+            background: rgba(249, 115, 22, 0.07);
+        }
+
+        .toc {
+            position: sticky;
+            top: 1rem;
+            max-height: calc(100vh - 2rem);
+            overflow: auto;
+            padding: 1rem;
+            border: 1px solid var(--border);
+            border-radius: 0.8rem;
+            background: rgba(17, 24, 39, 0.84);
+            box-shadow: 0 1rem 2.8rem var(--shadow);
+        }
+
+        .toc-title {
+            margin: 0 0 0.8rem;
+            color: var(--text-muted);
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            font-size: 0.72rem;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }
+
+        .toc nav {
+            display: grid;
+            gap: 0.38rem;
+        }
+
+        .toc a {
+            display: block;
+            padding: 0.25rem 0;
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            line-height: 1.35;
+            text-decoration: none;
+        }
+
+        .toc a:hover,
+        .toc a:focus-visible {
+            color: var(--accent-soft);
+            outline: none;
+        }
+
+        .toc a.depth-3 {
+            padding-left: 0.8rem;
+            font-size: 0.84rem;
+        }
+
+        .loading,
+        .error {
+            padding: 2rem;
+            color: var(--text-muted);
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        }
+
+        footer {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-top: 2rem;
+            padding-top: 1.2rem;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 980px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+
+            .toc {
+                position: static;
+                max-height: none;
+                order: -1;
+            }
+        }
+
+        @media (max-width: 640px) {
+            body {
+                padding: 1rem 0.75rem 2.25rem;
+            }
+
+            .logo-row {
+                align-items: flex-start;
+            }
+
+            .logo-mark {
+                width: 2.8rem;
+                height: 2.8rem;
+                flex: 0 0 auto;
+            }
+
+            .guide-shell {
+                padding: 1rem;
+                border-radius: 0.6rem;
+            }
+
+            .guide p,
+            .guide li {
+                font-size: 1rem;
+            }
+
+            .guide th,
+            .guide td {
+                min-width: 8rem;
+                padding: 0.65rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="status-bar">
+            <span>HOST homelab.automatictoaster.com</span>
+            <span class="status-online">GUIDE STATUS: ONLINE</span>
+        </div>
+
+        <header>
+            <div class="logo-row">
+                <div class="logo-mark" aria-hidden="true">AT</div>
+                <h1>Senior Linux & HPC Homelab Study Guide</h1>
+            </div>
+
+            <div class="tagline">
+                A hands-on path for practicing Linux, Proxmox, SLURM, Kubernetes,
+                storage, identity, GPU scheduling, and boot security.
+                <span>Readable first, lab-ready always.</span>
+            </div>
+
+            <div class="header-actions">
+                <a class="action-link primary" href="#guide">Read the Guide</a>
+                <a class="action-link" href="./README.md">View Markdown</a>
+                <a class="action-link" href="https://github.com/Toseph/hpc-homelab-guide" target="_blank" rel="noopener noreferrer">GitHub Repo</a>
+            </div>
+        </header>
+
+        <div class="layout">
+            <main class="guide-shell" id="guide" tabindex="-1">
+                <article class="guide" id="guideContent" aria-live="polite">
+                    <div class="loading">$ cat README.md | render</div>
+                </article>
+            </main>
+
+            <aside class="toc" aria-label="Table of contents">
+                <p class="toc-title">Guide Map</p>
+                <nav id="tocNav">
+                    <a href="#guide">Loading guide...</a>
+                </nav>
+            </aside>
+        </div>
+
+        <footer>
+            <span>Automatic Toaster / Homelab Systems Guide</span>
+            <span>Markdown source rendered from this repository</span>
+        </footer>
+    </div>
+
+    <noscript>
+        <div class="container">
+            <p class="error">JavaScript is required for the styled guide view. The Markdown source is available at <a href="./README.md">README.md</a>.</p>
+        </div>
+    </noscript>
+
+    <script>
+        "use strict";
+
+        const guideContent = document.getElementById("guideContent");
+        const tocNav = document.getElementById("tocNav");
+
+        function escapeHtml(value) {
+            return String(value)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        function slugify(value, used) {
+            const base = value
+                .toLowerCase()
+                .replace(/<[^>]+>/g, "")
+                .replace(/&[^;]+;/g, "")
+                .replace(/[^a-z0-9]+/g, "-")
+                .replace(/^-+|-+$/g, "") || "section";
+            let slug = base;
+            let index = 2;
+            while (used.has(slug)) {
+                slug = `${base}-${index}`;
+                index += 1;
+            }
+            used.add(slug);
+            return slug;
+        }
+
+        function renderInline(value) {
+            const tokens = [];
+            let text = escapeHtml(value);
+
+            text = text.replace(/`([^`]+)`/g, (_, code) => {
+                const token = `@@CODE${tokens.length}@@`;
+                tokens.push(`<code>${code}</code>`);
+                return token;
+            });
+
+            text = text
+                .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+                .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+                .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+            tokens.forEach((html, index) => {
+                text = text.replace(`@@CODE${index}@@`, html);
+            });
+
+            return text;
+        }
+
+        function renderMarkdown(markdown) {
+            const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+            const html = [];
+            const headings = [];
+            const usedSlugs = new Set();
+            let paragraph = [];
+            let listType = null;
+            let table = [];
+            let inCode = false;
+            let codeLines = [];
+
+            function flushParagraph() {
+                if (!paragraph.length) return;
+                html.push(`<p>${renderInline(paragraph.join(" "))}</p>`);
+                paragraph = [];
+            }
+
+            function flushList() {
+                if (!listType) return;
+                html.push(`</${listType}>`);
+                listType = null;
+            }
+
+            function flushTable() {
+                if (!table.length) return;
+                const rows = table.slice();
+                const header = rows.shift();
+                if (!rows.length) {
+                    paragraph.push(table.map(row => row.raw).join(" "));
+                    table = [];
+                    return;
+                }
+                html.push("<table>");
+                html.push(`<thead><tr>${header.cells.map(cell => `<th>${renderInline(cell)}</th>`).join("")}</tr></thead>`);
+                html.push("<tbody>");
+                rows.forEach(row => {
+                    html.push(`<tr>${row.cells.map(cell => `<td>${renderInline(cell)}</td>`).join("")}</tr>`);
+                });
+                html.push("</tbody></table>");
+                table = [];
+            }
+
+            function closeBlocks() {
+                flushParagraph();
+                flushList();
+                flushTable();
+            }
+
+            function parseTableRow(line) {
+                if (!line.includes("|")) return null;
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return null;
+                const cells = trimmed.slice(1, -1).split("|").map(cell => cell.trim());
+                if (!cells.length) return null;
+                if (cells.every(cell => /^:?-{3,}:?$/.test(cell))) return { separator: true, raw: line, cells };
+                return { separator: false, raw: line, cells };
+            }
+
+            lines.forEach(line => {
+                if (inCode) {
+                    if (/^```/.test(line.trim())) {
+                        html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+                        inCode = false;
+                        codeLines = [];
+                    } else {
+                        codeLines.push(line);
+                    }
+                    return;
+                }
+
+                if (/^```/.test(line.trim())) {
+                    closeBlocks();
+                    inCode = true;
+                    codeLines = [];
+                    return;
+                }
+
+                const tableRow = parseTableRow(line);
+                if (tableRow) {
+                    flushParagraph();
+                    flushList();
+                    if (!tableRow.separator) table.push(tableRow);
+                    return;
+                }
+
+                flushTable();
+
+                const trimmed = line.trim();
+                if (!trimmed) {
+                    closeBlocks();
+                    return;
+                }
+
+                if (/^---+$/.test(trimmed)) {
+                    closeBlocks();
+                    html.push("<hr>");
+                    return;
+                }
+
+                const heading = /^(#{1,4})\s+(.+)$/.exec(trimmed);
+                if (heading) {
+                    closeBlocks();
+                    const depth = heading[1].length;
+                    const title = renderInline(heading[2]);
+                    const plainTitle = heading[2].replace(/`|\*|\[|\]|\([^)]*\)/g, "");
+                    const id = slugify(plainTitle, usedSlugs);
+                    headings.push({ depth, id, title: escapeHtml(plainTitle) });
+                    html.push(`<h${depth} id="${id}">${title}</h${depth}>`);
+                    return;
+                }
+
+                const unordered = /^[-*]\s+(.+)$/.exec(trimmed);
+                const ordered = /^\d+\.\s+(.+)$/.exec(trimmed);
+                if (unordered || ordered) {
+                    flushParagraph();
+                    const nextType = unordered ? "ul" : "ol";
+                    if (listType && listType !== nextType) flushList();
+                    if (!listType) {
+                        listType = nextType;
+                        html.push(`<${listType}>`);
+                    }
+                    html.push(`<li>${renderInline((unordered || ordered)[1])}</li>`);
+                    return;
+                }
+
+                const quote = /^>\s?(.+)$/.exec(trimmed);
+                if (quote) {
+                    closeBlocks();
+                    html.push(`<blockquote><p>${renderInline(quote[1])}</p></blockquote>`);
+                    return;
+                }
+
+                flushList();
+                paragraph.push(trimmed);
+            });
+
+            if (inCode) {
+                html.push(`<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+            }
+            closeBlocks();
+
+            return { html: html.join("\n"), headings };
+        }
+
+        function renderToc(headings) {
+            const usefulHeadings = headings.filter(heading => heading.depth >= 2 && heading.depth <= 3);
+            if (!usefulHeadings.length) {
+                tocNav.innerHTML = '<a href="#guide">Guide</a>';
+                return;
+            }
+            tocNav.innerHTML = usefulHeadings
+                .map(heading => `<a class="depth-${heading.depth}" href="#${heading.id}">${heading.title}</a>`)
+                .join("");
+        }
+
+        async function loadGuide() {
+            try {
+                const response = await fetch("./README.md", { cache: "no-cache" });
+                if (!response.ok) throw new Error(`README.md returned ${response.status}`);
+                const markdown = await response.text();
+                const rendered = renderMarkdown(markdown);
+                guideContent.innerHTML = rendered.html;
+                renderToc(rendered.headings);
+            } catch (error) {
+                guideContent.innerHTML = `<p class="error">Could not load README.md. Open the Markdown source directly: <a href="./README.md">README.md</a>.</p>`;
+                tocNav.innerHTML = '<a href="./README.md">README.md</a>';
+                console.error(error);
+            }
+        }
+
+        loadGuide();
+    </script>
+</body>
+</html>
