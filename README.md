@@ -1,6 +1,6 @@
 # Senior Linux Admin & HPC Homelab Study Guide
 
-**Version:** 4.0.1
+*Version 4.0.2*
 
 A from-scratch, hands-on path for practicing the systems engineering skills that senior Linux, HPC, and SRE roles actually test: Linux fundamentals, scheduler operations, parallel and shared storage, GPU scheduling, Kubernetes, RDMA/MPI concepts, identity, and boot/firmware internals — on two consumer machines and a NAS you may already own.
 
@@ -152,16 +152,18 @@ Budget in **stages, not simultaneity** — this is realistic anyway, since produ
 
 # Part A — Hypervisor Deployment Runbook  `[Validated]`
 
-Proxmox VE. Budget one evening for A1–A8, one dedicated evening for A9 (GPU passthrough — the fiddliest single step), one more for A10–A11.
+Proxmox VE. Budget one evening for A1–A9, one dedicated evening for A10 (GPU passthrough — the fiddliest single step), one more for A11–A12.
+
+**A note on the command examples throughout Part A:** most steps show what correct output actually looks like, because "did that work?" is the question every runbook leaves unanswered and the one that costs the most time. Where a command succeeds silently, that is called out too — silence is a result, and knowing which commands are supposed to be quiet saves you from chasing a non-problem. Sample outputs use plausible values (IPs, UUIDs, serial numbers); yours will differ in the specifics and should match in the shape.
 
 ## A1. Prep, USB, BIOS
 
 1. Download the **Proxmox VE** ISO and verify its SHA256 checksum.
 2. Write it to USB in **raw/DD mode** — Rufus ("DD Image mode" when prompted), balenaEtcher, or `dd`. Avoid Ventoy for this ISO specifically; it has a history of quirks with it.
-3. **If your lab box has more than one drive and any of them holds an old OS, decide your storage layout before touching the installer.** On the reference build, an old forgotten Windows install on a second drive created boot ambiguity that took a session to clean up (documented in A3 and A4 so you can skip the experience). The cleanest prevention with multiple drives: **physically disconnect every drive except your install target** before booting the installer. One cable removes an entire category of mistake.
+3. **If your lab box has more than one drive and any of them holds an old OS, decide your storage layout before touching the installer.** On the reference build, an old forgotten Windows install on a second drive created boot ambiguity that took a session to clean up (documented in A3 and A5 so you can skip the experience). The cleanest prevention with multiple drives: **physically disconnect every drive except your install target** before booting the installer. One cable removes an entire category of mistake.
 4. BIOS settings (names vary by vendor; these are AMD-typical):
    - **SVM Mode: Enabled** — virtualization extensions.
-   - **IOMMU: Enabled**, set explicitly rather than left on "Auto" — required for GPU passthrough in A9.
+   - **IOMMU: Enabled**, set explicitly rather than left on "Auto" — required for GPU passthrough in A10.
    - **CSM: Disabled** — pure UEFI boot.
    - **fTPM: Enabled** — *optional*. This gives the **physical host** a TPM 2.0. Note that the boot-security work in Stage 9 happens inside VMs using a **virtual** TPM (`tpmstate0`), which does not depend on host fTPM at all. Enable host fTPM only if you intend to do measured-boot experiments on the bare-metal host itself.
    - Fast Boot: off.
@@ -169,7 +171,7 @@ Proxmox VE. Budget one evening for A1–A8, one dedicated evening for A9 (GPU pa
 ## A2. Install
 
 1. Boot the USB. Graphical and Terminal UI installers produce identical results — pick Graphical unless your hardware is console-only. Either way this is the last time you will use a local console; everything after is web UI and SSH.
-2. Target disk: your chosen boot drive. Filesystem: **ZFS (RAID0)** if it is a single disk — despite the name, that means "one vdev, no redundancy," which is the only valid single-drive choice. Durability for this lab comes from scheduled backups (A11), not disk mirroring.
+2. Target disk: your chosen boot drive. Filesystem: **ZFS (RAID0)** if it is a single disk — despite the name, that means "one vdev, no redundancy," which is the only valid single-drive choice. Durability for this lab comes from scheduled backups (A12), not disk mirroring.
 3. If the installer's Advanced Options exposes a ZFS ARC maximum, set it modestly (2–3 GB is plenty for a lab-sized pool) — and check the units shown (MiB vs GiB) before accepting; that field is easy to misread by a factor of 1024 in either direction.
 4. Country/timezone, a strong root password, a real email address.
 5. Management network: a static IP on your LAN. **Verify your actual gateway first** (`ipconfig` on Windows, `ip route | grep default` on Linux or macOS) rather than assuming a common default.
@@ -185,11 +187,19 @@ To make it permanent, first find out which bootloader is actually in use:
 proxmox-boot-tool status
 ```
 
-This reports either `uefi` or `grub` — **`uefi` is Proxmox's label for a systemd-boot-managed ESP**, which is typical for a ZFS-root UEFI install. It does not print the string "systemd-boot," so do not go looking for it.
+Expected output:
+
+```
+Re-executing '/usr/sbin/proxmox-boot-tool' in new private mount namespace..
+System currently booted with uefi
+E4E4-E4E4 is configured with: uefi (versions: 6.14.8-2-pve, 6.14.11-1-pve)
+```
+
+Read it this way: **`booted with uefi` is Proxmox's label for a systemd-boot-managed ESP**, which is typical for a ZFS-root UEFI install — it does not print the string "systemd-boot," so do not go looking for it. The hex string is the ESP partition's UUID, and the versions listed are the kernels currently installed onto that ESP. If instead you see `booted with grub`, use the GRUB path below.
 
 For the `uefi` (systemd-boot) case:
 ```bash
-nano /etc/kernel/cmdline
+vim /etc/kernel/cmdline
 # append to the single existing line, e.g.:
 # root=ZFS=rpool/ROOT/pve-1 boot=zfs nomodeset
 proxmox-boot-tool refresh
@@ -202,13 +212,242 @@ Cold power-cycle (not a warm reboot) to confirm it holds by itself.
 
 ```bash
 efibootmgr -v              # list all entries with Boot numbers; identify each
-efibootmgr -b XXXX -B      # delete a specific stale entry
-efibootmgr -o YYYY,ZZZZ    # set boot order, correct entry first
 ```
 
-Do this only after any old OS on another drive has actually been wiped (A4).
+A messy machine (what you are fixing) looks like:
 
-## A4. Wiping and repurposing a second drive, safely
+```
+BootCurrent: 0000
+BootOrder: 0002,0000,0001
+Boot0000* Linux Boot Manager	HD(2,GPT,1a2b...,0x800,0x100000)/File(\EFI\systemd\systemd-bootx64.efi)
+Boot0001* Windows Boot Manager	HD(1,GPT,9f8e...,0x800,0x32000)/File(\EFI\Microsoft\Boot\bootmgfw.efi)
+Boot0002* UEFI OS	HD(2,GPT,1a2b...,0x800,0x100000)/File(\EFI\BOOT\BOOTX64.EFI)
+```
+
+Three entries, and `BootOrder` starting with the generic `UEFI OS` fallback rather than your actual bootloader — that ambiguity is what makes a machine boot the wrong thing intermittently.
+
+```bash
+efibootmgr -b 0001 -B      # delete a specific stale entry (repeat per entry)
+efibootmgr -o 0000         # set boot order, correct entry first
+```
+
+Clean afterward:
+
+```
+BootCurrent: 0000
+BootOrder: 0000
+Boot0000* Linux Boot Manager	HD(2,GPT,1a2b...,0x800,0x100000)/File(\EFI\systemd\systemd-bootx64.efi)
+```
+
+Do this only after any old OS on another drive has actually been wiped (A5).
+
+## A4. First contact: verify the NIC, find the web UI, get a real editor
+
+You have a console. Now you need to reach the machine from your workstation — and to know whether the network is actually working rather than guessing. Do this before anything else, because the rest of Part A is much easier from an SSH session than from a physical keyboard.
+
+### A4a. Is the link physically up?
+
+```bash
+ip -br link
+```
+
+Expected on a healthy wired host:
+
+```
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP>
+enp6s0           UP             a8:a1:59:xx:xx:xx <BROADCAST,MULTICAST,UP,LOWER_UP>
+wlp5s0           DOWN           b4:6b:fc:xx:xx:xx <NO-CARRIER,BROADCAST,MULTICAST,UP>
+vmbr0            UP             a8:a1:59:xx:xx:xx <BROADCAST,MULTICAST,UP,LOWER_UP>
+```
+
+Read it this way: **`LOWER_UP` means carrier detected** — a cable is plugged into a live switch port. **`NO-CARRIER` means nothing on the other end** (unplugged, dead port, dead cable). The WiFi card showing `DOWN`/`NO-CARRIER` is expected and fine; see A4e.
+
+Then check the physical layer directly:
+
+```bash
+ethtool enp6s0
+```
+
+Expected (trimmed to what matters):
+
+```
+Settings for enp6s0:
+        Supported ports: [ TP ]
+        Speed: 1000Mb/s
+        Duplex: Full
+        Auto-negotiation: on
+        Link detected: yes
+```
+
+**`Link detected: yes` is the line that matters.** If it says `no`, stop and fix cabling before touching software. If `Speed:` reads 100Mb/s on gigabit hardware, you have a bad cable, a bad port, or a negotiation problem — that will quietly halve your NAS throughput later and be maddening to diagnose then.
+
+If the driver never loaded at all, the interface will not appear in `ip -br link`. Check with:
+
+```bash
+lspci -nnk | grep -A3 -i ethernet
+```
+
+Expected: the controller listed with a `Kernel driver in use:` line beneath it. If that line is missing, the NIC has no driver — note the PCI ID and search for it; a very new consumer NIC occasionally needs a backported driver.
+
+### A4b. Where is my IP address?
+
+```bash
+ip -br a
+```
+
+Expected:
+
+```
+lo               UNKNOWN        127.0.0.1/8 ::1/128
+enp6s0           UP
+vmbr0            UP             192.168.1.10/24 fe80::aaa1:59ff:fexx:xxxx/64
+```
+
+**This is the detail that confuses nearly everyone:** the physical NIC has *no IP address*, and that is correct. Proxmox enslaves the physical interface to the bridge `vmbr0`, and **the bridge holds the address**. Do not diagnose a perfectly healthy machine as broken because `enp6s0` looks empty.
+
+Confirm the enslavement is real:
+
+```bash
+ip link show master vmbr0
+```
+
+Expected: your physical NIC listed as a member. If this returns nothing, the bridge has no port — the machine will have an IP configured but no path to the network, which looks bewildering until you check this one thing.
+
+### A4c. The web UI address
+
+The address on `vmbr0` is your host address. From the example above, the web interface is:
+
+```
+https://192.168.1.10:8006
+```
+
+Port 8006, HTTPS (plain HTTP will not answer), and a self-signed certificate warning you are expected to click through.
+
+Confirm the host agrees with itself about its identity:
+
+```bash
+hostname -f
+cat /etc/hosts
+```
+
+Expected `/etc/hosts` line:
+
+```
+192.168.1.10 lab1.hpc.internal lab1
+```
+
+Proxmox reads its own address from `/etc/hosts` rather than from the interface. If you ever change the host's IP, change it here too, or cluster services and the web UI will disagree about where the machine lives.
+
+### A4d. If there is no IP at all
+
+Read the config that produced (or failed to produce) it:
+
+```bash
+cat /etc/network/interfaces
+```
+
+Expected for a static setup:
+
+```
+auto lo
+iface lo inet loopback
+
+iface enp6s0 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+        address 192.168.1.10/24
+        gateway 192.168.1.1
+        bridge-ports enp6s0
+        bridge-stp off
+        bridge-fd 0
+```
+
+**The single most common failure here:** `bridge-ports` names an interface that does not exist — because the NIC is named something else than you assumed at install time, or a typo crept in. Compare that name character-by-character against `ip -br link`. Fix it, then:
+
+```bash
+ifreload -a
+```
+
+Then test outward in three deliberate steps, because each one isolates a different layer:
+
+```bash
+ping -c3 192.168.1.1        # your router: local L2/L3 works
+ping -c3 1.1.1.1            # the internet by IP: routing works
+ping -c3 deb.debian.org     # by name: DNS works
+```
+
+If the first two succeed and the third fails, it is DNS — check `/etc/resolv.conf` for a sane `nameserver` line. If the first succeeds and the second does not, check the `gateway` line. This three-ping ladder is worth internalizing; it turns "the network is broken" into a specific answer in about ten seconds.
+
+### A4e. About the WiFi card
+
+Leave it unconfigured, and use the wired connection for the lab. Two reasons, one practical and one fundamental:
+
+- Proxmox ships no WiFi management stack by default — no NetworkManager, no configured `wpa_supplicant` — so the card simply sits idle.
+- More fundamentally, **you cannot bridge a WiFi client interface the way you bridge ethernet.** The 802.11 frame format used in client mode does not carry the additional address field needed to forward traffic on behalf of other devices, so `bridge-ports wlp5s0` will not give your VMs network access. This is a protocol limitation, not a Proxmox one, and no amount of configuration fixes it.
+
+If you want the card to stop appearing in `ip` output, blacklist its driver — but ignoring it is perfectly fine.
+
+### A4f. The remote access model
+
+The chain for this lab is:
+
+```
+your phone/laptop  ──Parsec──▶  workstation (4090)  ──SSH / HTTPS──▶  Proxmox host
+                                        │
+                                        └──▶ web UI ──▶ VM consoles (noVNC)
+```
+
+From the workstation:
+
+```bash
+ssh root@192.168.1.10                  # shell
+```
+
+and `https://192.168.1.10:8006` in a browser for the UI.
+
+Set up key authentication so you are not typing the root password dozens of times per evening:
+
+```bash
+# run this ON the workstation, not the Proxmox host
+ssh-copy-id root@192.168.1.10
+```
+
+Two things worth being deliberate about:
+
+**Do not expose port 8006 or SSH to the internet.** The Parsec hop into your workstation *is* your remote access path, and it keeps the lab entirely LAN-only. If you later want direct access without Parsec in the middle, add a VPN (WireGuard or Tailscale) rather than forwarding ports on your router. A Proxmox web UI reachable from the open internet is a genuinely bad idea.
+
+**The web UI's noVNC console is your crash cart.** When a VM loses its network — which will happen, repeatedly, as you build the cluster — you do not need SSH into that VM to fix it. Open its console from the UI and you have a keyboard on the virtual machine's screen. This is why losing the *host's* physical console to GPU passthrough (A10) is survivable: every VM still has a console, delivered over the network.
+
+### A4g. Get vim
+
+Proxmox ships `vim.tiny`, which provides `vi` but not full vim.
+
+```bash
+apt update
+apt install -y vim
+```
+
+If `apt update` throws a `401 Unauthorized` on `enterprise.proxmox.com`, that is expected on a fresh install without a subscription — it is fixed in A6. The Debian repositories still work, so vim installs regardless.
+
+Survival set, enough to edit every config file in this guide:
+
+| Key | Action |
+|---|---|
+| `i` | insert before cursor |
+| `A` | append at **end of line** — the one you want for `/etc/kernel/cmdline` |
+| `Esc` | return to normal mode |
+| `:w` | write |
+| `:q` / `:q!` | quit / quit discarding changes |
+| `:wq` or `ZZ` | write and quit |
+| `dd` | delete current line |
+| `/text` then `n` | search, jump to next match |
+| `gg` / `G` | jump to start / end of file |
+| `u` | undo |
+
+One gotcha specific to `vim.tiny`: arrow keys in insert mode may insert stray `A`/`B`/`C`/`D` characters instead of moving the cursor. Installing full vim fixes it, as does `:set nocompatible`.
+
+## A5. Wiping and repurposing a second drive, safely
 
 If a second local drive previously held another OS, here is the safe reclaim — and the order matters more than the commands do.
 
@@ -217,12 +456,91 @@ If a second local drive previously held another OS, here is the safe reclaim —
 **After install, from the running hypervisor shell:**
 ```bash
 lsblk -o NAME,SIZE,MODEL,SERIAL   # identify the drive by size and model — never by letter alone
-zpool import                       # if an old ZFS pool shows as importable, note it — do NOT import
+```
+
+A drive still carrying an old Proxmox install looks like this — note the three partition children:
+
+```
+NAME     SIZE MODEL                SERIAL
+sda    447.1G Samsung SSD 860 EVO  S3Zxxxxxxxxxxx
+├─sda1  1007K
+├─sda2     1G
+└─sda3 446.1G
+sdb    931.5G Samsung SSD 860 EVO  S5Gxxxxxxxxxxx
+├─sdb1  1007K
+├─sdb2     1G
+└─sdb3 930.5G
+```
+
+That 1007K/1G/rest pattern is the Proxmox signature: BIOS boot partition, EFI system partition, then the ZFS pool filling the remainder — which is why the pool lives on **partition 3**.
+
+```bash
+zpool import                       # if an old pool shows as importable, note it — do NOT import
+```
+
+If a foreign pool is present:
+
+```
+   pool: rpool
+     id: 1234567890123456789
+  state: ONLINE
+ action: The pool can be imported using its name or numeric identifier.
+ config:
+
+        rpool       ONLINE
+          sdb3      ONLINE
+```
+
+**This is the dangerous state** — two pools named `rpool`, one of which is your running system. If instead you see:
+
+```
+no pools available to import
+```
+
+that is success: either the disk is already clean, or you have not attached it yet. Either way there is nothing to collide with.
+
+```bash
 zpool labelclear -f /dev/sdX3      # ZFS label copies live at the END of the partition too;
-                                   # a Proxmox-style install usually put its pool on partition 3
+                                   # a Proxmox-style install put its pool on partition 3
 sgdisk --zap-all /dev/sdX          # destroy the partition table (whole disk, no partition number)
 wipefs -a /dev/sdX                 # clear residual filesystem/RAID/ZFS signatures
 ```
+
+`sgdisk --zap-all` prints:
+
+```
+Creating new GPT entries in memory.
+GPT data structures destroyed! You may now partition the disk using fdisk or
+other utilities.
+```
+
+`wipefs -a` prints one line per signature it erased (and nothing at all if there were none):
+
+```
+/dev/sdb: 8 bytes were erased at offset 0x00000200 (gpt): 45 46 49 20 50 41 52 54
+/dev/sdb: 8 bytes were erased at offset 0xe8e0db5e00 (gpt): 45 46 49 20 50 41 52 54
+/dev/sdb: 2 bytes were erased at offset 0x000001fe (PMBR): 55 aa
+```
+
+**Verify, and know what "clean" looks like:**
+
+```bash
+lsblk /dev/sdb
+```
+
+```
+NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+sdb      8:16   0 931.5G  0 disk
+```
+
+A single line with **no indented partition children beneath it** — that is a bare disk with no partition table and no filesystem metadata. Confirm nothing lingers:
+
+```bash
+wipefs /dev/sdb        # no -a: report only
+zpool import
+```
+
+Empty output from the first and `no pools available to import` from the second means the disk is genuinely clean and ready for A7.
 
 Substitute your real device and confirm with `lsblk` every time; there is no undo. This is a **metadata wipe, not a full erase** — it completes in seconds because it only removes the structures that make the old layout discoverable (partition table, filesystem signatures, ZFS labels), not the underlying data. That is sufficient for reuse. For a forensic-grade wipe, use `blkdiscard` (fast on SSDs) instead.
 
@@ -230,23 +548,168 @@ Substitute your real device and confirm with `lsblk` every time; there is no und
 
 If you do end up at that initramfs prompt: `zpool import` with no arguments lists both pools with numeric IDs, then `zpool import -N <numeric-id-of-the-correct-pool> rpool` and `exit` continues the boot.
 
-## A5. Post-install configuration
+## A6. Post-install configuration
 
-1. **Repositories:** disable the enterprise repo, enable the no-subscription repo (GUI: *Datacenter → your host → Updates → Repositories*), then `apt update && apt full-upgrade -y`.
+1. **Repositories.** The enterprise repository requires a paid subscription and will return `401 Unauthorized` without one, which aborts every `apt update`. Swap it for the no-subscription repository.
+
+   The GUI path is *Datacenter → your host → Updates → Repositories* — but that assumes you can already reach the web UI, so here is the file-level method that always works. **Start by looking at what is actually there** rather than assuming:
+
+   ```bash
+   ls -la /etc/apt/sources.list.d/
+   ```
+
+   Proxmox VE 9 (Debian 13 "trixie") uses the deb822 `.sources` format, so expect something like:
+
+   ```
+   ceph.sources
+   debian.sources
+   pve-enterprise.sources
+   ```
+
+   A system upgraded from PVE 8 may *also* carry legacy `.list` files — check for those and for `/etc/apt/sources.list` itself, since a leftover enterprise line in either will keep throwing 401s no matter what you do to the `.sources` files.
+
+   Look at the enterprise definition:
+
+   ```bash
+   cat /etc/apt/sources.list.d/pve-enterprise.sources
+   ```
+
+   Expected:
+
+   ```
+   Types: deb
+   URIs: https://enterprise.proxmox.com/debian/pve
+   Suites: trixie
+   Components: pve-enterprise
+   Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+   ```
+
+   Disable it by adding a single line — deb822 supports an explicit toggle, which is cleaner than commenting or deleting because the file stays readable and reversible:
+
+   ```bash
+   vim /etc/apt/sources.list.d/pve-enterprise.sources
+   # add:  Enabled: false
+   ```
+
+   Do the same for `ceph.sources` if its `URIs:` also points at `enterprise.proxmox.com`.
+
+   Now add the no-subscription repository:
+
+   ```bash
+   vim /etc/apt/sources.list.d/pve-no-subscription.sources
+   ```
+
+   ```
+   Types: deb
+   URIs: http://download.proxmox.com/debian/pve
+   Suites: trixie
+   Components: pve-no-subscription
+   Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+   ```
+
+   **`Suites:` must match your Debian base**, or apt will fetch the wrong release's packages. Confirm it rather than trusting this document:
+
+   ```bash
+   cat /etc/os-release | grep VERSION_CODENAME
+   ```
+
+   Then update and verify:
+
+   ```bash
+   apt update
+   ```
+
+   Success looks like a clean run ending in `Reading package lists... Done` with **no** `401` and no `E:` lines. Before the fix you would have seen:
+
+   ```
+   E: Failed to fetch https://enterprise.proxmox.com/debian/pve/dists/trixie/InRelease
+      401  Unauthorized [IP: ...]
+   E: The repository '...' is not signed.
+   ```
+
+   Confirm which repositories are actually live:
+
+   ```bash
+   apt policy | grep -E "proxmox|debian"
+   ```
+
+   Expected: `download.proxmox.com` present, `enterprise.proxmox.com` absent. Then:
+
+   ```bash
+   apt full-upgrade -y
+   ```
+
+   The "no valid subscription" popup in the web UI is unrelated to this and harmless; it is a licensing notice, not an error.
 2. **ZFS ARC cap**, if not set during install:
 ```bash
 echo "options zfs zfs_arc_max=3221225472" > /etc/modprobe.d/zfs.conf   # 3 GB; adjust to taste
 update-initramfs -u -k all        # required — root is on ZFS, so this must ride in the initramfs
-# after reboot, confirm:  arc_summary | grep -A2 "ARC size"
 ```
-3. **Sanity checks:**
+
+After the next reboot, confirm the cap actually took:
+
 ```bash
-dmesg | grep -i -e AMD-Vi -e IOMMU     # interrupt-remapping lines confirm IOMMU is genuinely active
+arc_summary | grep -A4 "ARC size"
+```
+
+Expected — the `Max size` figure should equal what you set, not your total RAM:
+
+```
+ARC size (current):                                     4.1 %  126.2 MiB
+        Target size (adaptive):                       100.0 %    3.0 GiB
+        Min size (hard limit):                          6.2 %  192.0 MiB
+        Max size (high water):                           16:1    3.0 GiB
+```
+
+If `Max size` still shows roughly half your RAM, the setting did not reach the initramfs — re-run `update-initramfs -u -k all` and reboot.
+3. **Sanity checks — and what each should actually print.**
+
+```bash
+dmesg | grep -i -e AMD-Vi -e DMAR -e IOMMU
+```
+
+Expected on AMD with IOMMU enabled in BIOS:
+
+```
+[    0.512345] AMD-Vi: Using global IVHD EFR:0x246577efa2254afa, EFR2:0x0
+[    0.534567] pci 0000:00:00.2: AMD-Vi: Found IOMMU cap 0x40
+[    0.556789] AMD-Vi: Interrupt remapping enabled
+[    0.578901] AMD-Vi: Virtual APIC enabled
+```
+
+**`Interrupt remapping enabled` is the line that matters.** *Empty output means IOMMU is off in firmware* — go back to BIOS before attempting A10, because passthrough cannot work without it. (On Intel the equivalent lines say `DMAR:` instead of `AMD-Vi:`.)
+
+```bash
 pvesm status
+```
+
+Expected on a fresh single-disk install:
+
+```
+Name             Type     Status           Total            Used       Available        %
+local             dir     active        98497780         2841524        90621136    2.88%
+local-zfs     zfspool     active       450000000            2400       449997600    0.00%
+```
+
+`Status: active` on every row is what you want. Once you add the NAS (A9) and second pool (A7), `nas-pve` and `vmdata` join this list — and an NFS storage showing `inactive` means the mount failed, not that the config is wrong.
+
+```bash
 zfs list
 ```
 
-## A6. Claiming a second drive as VM storage
+Expected on a fresh install:
+
+```
+NAME               USED  AVAIL  REFER  MOUNTPOINT
+rpool             1.50G   448G    96K  /rpool
+rpool/ROOT        1.49G   448G    96K  /rpool/ROOT
+rpool/ROOT/pve-1  1.49G   448G  1.49G  /
+rpool/data          96K   448G    96K  /rpool/data
+```
+
+`rpool/ROOT/pve-1` mounted at `/` is your running system; `rpool/data` is where VM disks would land if you used the default pool — which, per A7, you will not.
+
+## A7. Claiming a second drive as VM storage
 
 Dedicate the second drive entirely to VM disks rather than sharing the boot drive. This gives VMs their own bandwidth and puts the hypervisor's root filesystem in an independent failure domain — separate reinstall paths, separate blast radius.
 
@@ -256,9 +719,42 @@ zfs set compression=lz4 vmdata
 pvesm add zfspool vmdata --pool vmdata --content images,rootdir --sparse 1
 ```
 
+None of these print anything on success — silence is the expected result. Verify explicitly:
+
+```bash
+zpool status vmdata
+```
+
+```
+  pool: vmdata
+ state: ONLINE
+config:
+
+        NAME        STATE     READ WRITE CKSUM
+        vmdata      ONLINE       0     0     0
+          sdb       ONLINE       0     0     0
+
+errors: No known data errors
+```
+
+`state: ONLINE` with zero error counters, and the whole disk (`sdb`, not `sdb1`) as the single vdev — which is what you want when ZFS owns the entire device.
+
+```bash
+pvesm status
+```
+
+`vmdata` should now appear alongside `local` and `local-zfs`, with `Status: active`:
+
+```
+Name             Type     Status           Total            Used       Available        %
+local             dir     active        98497780         2841524        90621136    2.88%
+local-zfs     zfspool     active       450000000            2400       449997600    0.00%
+vmdata        zfspool     active       938000000              96       937999904    0.00%
+```
+
 From here on, explicitly choose this pool as the storage target for every VM you create, rather than the default pool on your boot drive.
 
-## A7. Bridges
+## A8. Bridges
 
 The LAN bridge exists from install. Add the isolated cluster bridge:
 
@@ -272,7 +768,17 @@ iface vmbr1 inet manual
         bridge-vids 2-4094
 ```
 
-Apply with `ifreload -a`. No host IP, no physical port — a pure virtual switch.
+Apply with `ifreload -a`, then verify:
+
+```bash
+ip -br a show vmbr1
+```
+
+```
+vmbr1            UP
+```
+
+**`UP` with no IP address listed is exactly right** — no host IP, no physical port, a pure virtual switch. It will look "empty" compared to `vmbr0` and that is the design: the head node VM, not the hypervisor, routes this network.
 
 **Pin your interface names now, before adding any NICs later.** Predictable naming (`enp6s0`, etc.) is stable across reboots but keyed to PCI topology, so it can shift when you add or move a card. A shifted name means your bridge references a port that no longer exists — which looks like a network outage but is really an identity mismatch, the same category of mistake as trusting a drive letter. Fix it once with `.link` files keyed to MAC address:
 
@@ -290,14 +796,14 @@ EOF
 
 Semantic names pay off later (`lan0`, `cluster0`, `rdma0`). Update `/etc/network/interfaces` to match and reboot once so `systemd-udevd` applies the rename.
 
-## A8. NAS and ISOs
+## A9. NAS and ISOs
 
 1. On the NAS, create two NFS exports — one for the hypervisor datastore, one held in reserve for the object-storage stage. Restrict them to the hypervisor's IP where the UI allows.
 2. `pvesm add nfs nas-pve --server <NAS-IP> --export /nfs/pve --content backup,iso,vztmpl`
 3. Pull ISOs (GUI: *→ ISO Images → Download from URL*): a recent Ubuntu Server LTS, and a Rocky/AlmaLinux minimal if you plan to run RPM-based identity tooling in Stage 6. Keep local copies too, so template work does not depend on NAS health.
 4. Expectation setting: a NAS behind gigabit tops out near 112 MB/s. Every time that annoys you, it is the visceral argument for why production storage networks run at 100/200/400 GbE — and Stage 3 turns that annoyance into measurements.
 
-## A9. GPU passthrough (its own evening)
+## A10. GPU passthrough (its own evening)
 
 If your lab host has no integrated graphics, the local console goes dark permanently once the GPU is claimed for passthrough. That is expected and is why the lab is designed to be managed over SSH and the web UI.
 
@@ -337,11 +843,39 @@ update-initramfs -u -k all && reboot
 ```
 (Older guides list `vfio_virqfd`; it merged into vfio core in kernel 6.2+.)
 
-4. **Verify:** `lspci -nnk -s <bus:device>` should report `Kernel driver in use: vfio-pci` for **every** function of the card.
+4. **Verify.** Before binding, the card shows a host graphics driver (or none at all):
+
+```
+0a:00.0 VGA compatible controller [0300]: NVIDIA Corporation TU102 [GeForce RTX 2080 Ti] [10de:1e04] (rev a1)
+	Subsystem: ... [1462:3715]
+	Kernel driver in use: nouveau
+	Kernel modules: nvidiafb, nouveau
+```
+
+After the reboot:
+
+```bash
+lspci -nnk -s 0a:00
+```
+
+```
+0a:00.0 VGA compatible controller [0300]: NVIDIA Corporation TU102 [GeForce RTX 2080 Ti] [10de:1e04] (rev a1)
+	Subsystem: ... [1462:3715]
+	Kernel driver in use: vfio-pci
+	Kernel modules: nvidiafb, nouveau
+0a:00.1 Audio device [0403]: NVIDIA Corporation TU102 High Definition Audio Controller [10de:10f7] (rev a1)
+	Kernel driver in use: vfio-pci
+0a:00.2 USB controller [0c03]: NVIDIA Corporation TU106 USB 3.1 Host Controller [10de:1ad6] (rev a1)
+	Kernel driver in use: vfio-pci
+0a:00.3 Serial bus controller [0c80]: NVIDIA Corporation TU106 USB Type-C UCSI Controller [10de:1ad7] (rev a1)
+	Kernel driver in use: vfio-pci
+```
+
+Two things to read carefully. **`Kernel driver in use: vfio-pci` must appear for every function** (`.0` through `.3` here) — one function still bound to a host driver will block the passthrough. And **`Kernel modules:` still listing `nouveau` is normal and not a problem** — that line lists drivers that *could* bind, not what is bound.
 
 5. **Know your way back.** If you need the local console again, edit the boot entry and append `modprobe.blacklist=vfio_pci` for that one boot: vfio never binds, the normal framebuffer driver takes over, console returns. Learn this before you need it.
 
-## A10. The GPU VM and a reusable template
+## A11. The GPU VM and a reusable template
 
 **GPU passthrough VM** (adjust IDs and paths):
 ```bash
@@ -357,7 +891,20 @@ qm set 201 --hostpci0 <bus:device>,pcie=1
 
 Details that matter: `--balloon 0` with fixed memory is **mandatory** — passthrough pins guest memory, so ballooning accomplishes nothing and only confuses host accounting. Specifying the PCI address without a function suffix passes **all** functions of a multi-function card. Keep the default virtual display alongside the GPU so noVNC stays available as a fallback console; CUDA does not care which display is primary. The `tpmstate0` line gives this VM a **virtual** TPM 2.0 — this, not host fTPM, is what Stage 9's measured-boot work uses.
 
-Inside the guest, install the vendor's recommended server-branch driver and confirm with `nvidia-smi`.
+Inside the guest, install the vendor's recommended server-branch driver and confirm with `nvidia-smi`:
+
+```
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.xx.xx              Driver Version: 570.xx.xx      CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 2080 Ti     Off | 00000000:01:00.0 Off  |                  N/A |
+|  0%   35C    P8              20W / 250W |      1MiB / 11264MiB  |      0%      Default |
++-----------------------------------------+------------------------+----------------------+
+```
+
+One detail that surprises people: **the PCI address inside the guest is the virtual one** (`01:00.0` here), not the host's `0a:00.0`. The guest has its own PCI topology; it does not inherit the host's addressing.
 
 **Cloud-init template**, so future VMs clone instead of being hand-installed:
 ```bash
@@ -375,15 +922,35 @@ qm set 9000 --ciuser <you> --sshkeys /root/<your-pubkey>.pub
 qm template 9000
 ```
 
-Test with `qm clone 9000 150 --name scratch1 --full`: it should boot in seconds and accept your key. Then `qm destroy 150`.
+Test it:
 
-## A11. Backups
+```bash
+qm clone 9000 150 --name scratch1 --full
+```
+
+```
+create full clone of drive scsi0 (vmdata:base-9000-disk-0)
+transferred 0.0 B of 20.0 GiB (0.00%)
+transferred 210.0 MiB of 20.0 GiB (1.03%)
+...
+transferred 20.0 GiB of 20.0 GiB (100.00%)
+```
+
+Start it, and it should reach a login prompt in a few seconds and accept your SSH key with no password. Then clean up:
+
+```bash
+qm destroy 150
+```
+
+If the clone boots but refuses your key, the cause is almost always that `--sshkeys` pointed at a file that did not exist when you created the template — cloud-init silently proceeds with no key rather than failing loudly.
+
+## A12. Backups
 
 Schedule backups to the NAS datastore (weekly, zstd, snapshot mode is fine for a lab), plus an occasional manual dump to local storage as an on-box copy.
 
 **Do one restore drill before moving on.** A backup you have never restored is a rumor, not a safety net. This is also a question you should hope an interviewer asks.
 
-**Part A exit criteria:** hands-free cold boot to a console with no manual intervention; stale boot entries cleaned; ARC capped and confirmed; second drive dedicated to VM storage; isolated bridge up and VLAN-aware; interface names pinned; NAS datastore mounted; every GPU function on `vfio-pci`; `nvidia-smi` clean inside the passthrough VM; a template clone boots and accepts your key; one backup successfully restored.
+**Part A exit criteria:** hands-free cold boot to a console with no manual intervention; stale boot entries cleaned; `ethtool` reports `Link detected: yes` at full negotiated speed; the web UI answers on `:8006` and SSH key auth works from the workstation; repositories fixed so `apt update` runs clean with no 401; ARC capped and confirmed; second drive wiped to a bare device and dedicated to VM storage; isolated bridge up and VLAN-aware; interface names pinned; NAS datastore `active` in `pvesm status`; every GPU function on `vfio-pci`; `nvidia-smi` clean inside the passthrough VM; a template clone boots and accepts your key; one backup successfully restored.
 
 ---
 
@@ -729,7 +1296,8 @@ No single correct pace — go faster where a stage is close to your existing exp
 
 | Stage | Time |
 |---|---|
-| Part A — hypervisor build (A1–A11) | 1 week, including a dedicated evening for A9 (GPU passthrough) |
+| Part A — hypervisor build (A1–A12) | 1 week, including a dedicated evening for A10 (GPU passthrough) |
+| — of which A4 (network first contact) | 30 minutes, and it makes everything after it easier |
 | Stage 1 — fundamentals | ongoing throughout; never really "done" |
 | Stage 2 — SLURM build and operations | 2–3 weeks (2a builds it; 2b is where the depth is) |
 | Stage 3 — storage | 2 weeks |
@@ -747,15 +1315,19 @@ No single correct pace — go faster where a stage is close to your existing exp
 Recovery moves worth knowing *before* you need them:
 
 - **Black screen right after kernel handoff** → at the boot menu, `e`, append `nomodeset`; once confirmed, persist it in your bootloader's config and re-apply (A3).
-- **Console lost to GPU passthrough** → boot-menu edit, append `modprobe.blacklist=vfio_pci` for one boot; the normal display driver takes back over (A9).
+- **Console lost to GPU passthrough** → boot-menu edit, append `modprobe.blacklist=vfio_pci` for one boot; the normal display driver takes back over (A10).
 - **A cmdline edit "did not take"** → you edited the wrong bootloader's file, or skipped the apply step. `proxmox-boot-tool status` settles which one you are on; remember it reports `uefi` for systemd-boot.
-- **Two ZFS pools with the same name importable at boot** → the reason a second drive gets label-cleared (not merely partition-deleted) *before* it is ever powered on beside a fresh install (A4). If you are already at the initramfs prompt: `zpool import` to list numeric IDs, then `zpool import -N <id> rpool` and `exit`.
+- **Cannot reach the web UI** → work the ladder in order rather than guessing: `ethtool <nic>` for `Link detected: yes`; `ip -br a` for an address **on `vmbr0`, not on the physical NIC**; `ip link show master vmbr0` to confirm the NIC is actually enslaved to the bridge; then `ping` gateway → `1.1.1.1` → a hostname to separate local, routing, and DNS failures (A4).
+- **`bridge-ports` names an interface that does not exist** → the classic cause of "configured but unreachable." Compare `/etc/network/interfaces` against `ip -br link` character by character, fix, `ifreload -a` (A4d).
+- **`apt update` fails with 401 Unauthorized** → the enterprise repository without a subscription. Disable it and add no-subscription (A6). Check for leftover legacy `.list` files as well as `.sources`.
+- **Arrow keys typing `A`/`B`/`C`/`D` in the editor** → you are in `vim.tiny`. `apt install vim`, or `:set nocompatible` (A4g).
+- **Two ZFS pools with the same name importable at boot** → the reason a second drive gets label-cleared (not merely partition-deleted) *before* it is ever powered on beside a fresh install (A5). If you are already at the initramfs prompt: `zpool import` to list numeric IDs, then `zpool import -N <id> rpool` and `exit`.
 - **Stale UEFI boot entries** → `efibootmgr -v` to list, `-b XXXX -B` to delete, `-o` to reorder (A3).
 - **Stuck at a GRUB rescue prompt** → `set prefix=(hd0,gpt2)/boot/grub`, `insmod normal`, `normal`.
 - **Jobs hung in `D` state after a storage blip** → expected behavior on a `hard` NFS mount; they are waiting, not dead, and will resume when the server returns (Stage 3f). Killing them is not the fix; restoring the server is.
 - **"No space left on device" with free space showing** → inodes, not bytes. `df -i` (Stage 3b).
 - **A VM locked after a failed backup** → unlock it explicitly rather than fighting it manually.
-- **Anything genuinely unrecoverable** → this is why you rehearsed a restore in A11. A backup that has never been tested is a hope, not a plan.
+- **Anything genuinely unrecoverable** → this is why you rehearsed a restore in A12. A backup that has never been tested is a hope, not a plan.
 
 ## C. Reading List
 
