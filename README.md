@@ -1,179 +1,265 @@
 # Senior Linux Admin & HPC Homelab Study Guide
 
-A from-scratch, hands-on path for practicing the systems engineering skills that senior Linux/HPC roles actually test: Linux fundamentals, GPU scheduling, Kubernetes, RDMA/MPI concepts, identity and secure access, storage, and boot/firmware internals — all on two consumer boxes and a NAS you may already own.
+A from-scratch, hands-on path for practicing the systems engineering skills that senior Linux, HPC, and SRE roles actually test: Linux fundamentals, scheduler operations, parallel and shared storage, GPU scheduling, Kubernetes, RDMA/MPI concepts, identity, and boot/firmware internals — on two consumer machines and a NAS you may already own.
 
-This isn't a theory course. It's a build log, written as I actually ran it — including the mistakes, because the mistakes are often the most instructive part. If you're prepping for interviews in this space, treat each stage's closing questions as a self-test: can you explain this out loud, from memory, to someone who'll push back?
+This is a build log turned into a curriculum, including the mistakes, because the mistakes are usually the most instructive part. If you are preparing for interviews in this space, treat each stage's closing questions as a self-test: can you explain this out loud, from memory, to someone who will push back?
 
 ---
 
-## 0. Why This Exists, and What It Assumes
+## 0. How to Use This Guide
 
-Most "learn Kubernetes" or "learn HPC" tutorials run everything in one disposable VM or a cloud sandbox that costs money by the hour. That's fine for syntax, but it doesn't teach you the things that actually come up in senior interviews and senior jobs: what happens when two physical hosts disagree about the network, what a GPU passthrough failure actually looks like at 1am, why your bootloader matters, why identity has to come before scheduling.
+### Status labels — read these first
 
-This guide uses **two physical machines** (one dedicated lab host, one that stays your daily driver) plus a **NAS** for shared storage — enough hardware separation to make the networking, scheduling, and storage lessons real instead of simulated. A third spare box of any kind is a bonus, not a requirement; Stage 10 shows how to fold one in, using an Apple Silicon Mac mini as the worked example.
+Not every stage here is equally battle-tested, and pretending otherwise would waste your time. Every stage carries an honest status:
 
-**What you'll need**, roughly:
-- One "lab" box you're willing to wipe and dedicate — ideally with a GPU, 16–32 GB RAM, and any local SSD storage.
-- Your normal daily-driver machine, used for administration and, later, as a second physical node for multi-host GPU work.
-- Optional: a NAS or any second machine with spare storage, for backups and shared filesystem practice.
-- Optional: any additional spare computer on the same network — an old laptop, a mini PC, a Raspberry Pi 5, or an Apple Silicon Mac mini used as a part-time auxiliary node. If it's an ARM box, it unlocks a whole extra lesson (Stage 10).
-- Free software only: Proxmox VE, Ubuntu, SLURM, Kubernetes tooling, all open source.
+| Label | Meaning |
+|---|---|
+| **Validated** | Built and verified end-to-end on the reference hardware, including the failure paths. |
+| **In progress** | Actively being built; commands are real but the full chain is not yet proven. |
+| **Designed** | Architecture, command sequence, and validation steps worked out and individually sound, but not yet run start-to-finish as written. |
+| **Planned** | Roadmap. Concepts and approach are outlined; treat the specifics as a starting point for your own research. |
 
-**Example hardware used for this build**, so you can calibrate against yours:
+If a section is **Designed** or **Planned**, expect to do some debugging the guide does not do for you. That is not a defect — it is the honest state of a lab that is still growing, and working through the gaps is where the learning actually happens.
+
+### Three reading paths
+
+**If you already administer production Linux or HPC:** skip Part A's installer walkthrough (skim it for the failure modes, which are the interesting part), and go to whichever of Stages 4–6 covers your weakest area. Most experienced administrators find Kubernetes (Stage 6) and verbs-level RDMA (Stage 5) are the genuine gaps; scheduler and storage will be familiar but Stage 2's second half and Stage 3 both go deeper than typical day-to-day operation.
+
+**If you are a general Linux administrator moving toward HPC or SRE:** work Part A → Stage 1 → Stage 2 → Stage 3 in order. Those four build the foundation everything else assumes. Then pick between Stage 5 (if you are targeting HPC) and Stage 6 (if you are targeting cloud-native infrastructure).
+
+**If you are newer to infrastructure:** Part A and Stage 1 alone are several months of genuinely valuable work. Do not rush to Kubernetes. The people who interview well are the ones who can explain what happens between power-on and a login prompt, not the ones who memorized the most tool names.
+
+### Guide map
+
+- **Part A** — Hypervisor deployment runbook *(Validated)*
+- **Stage 1** — Linux and Python fundamentals *(In progress — ongoing)*
+- **Stage 2** — SLURM cluster, then scheduler operations *(Designed)*
+- **Stage 3** — HPC storage: metadata, failure modes, parallel filesystems *(Designed)*
+- **Stage 4** — RDMA, MPI, and GPU collective communication *(Designed)*
+- **Stage 5** — Kubernetes with real GPU scheduling *(Designed)*
+- **Stage 6** — Identity, access control, secure provisioning *(Designed)*
+- **Stage 7** — Network boot and infrastructure-as-code *(Designed)*
+- **Stage 8** — Self-hosted object storage *(Planned)*
+- **Stage 9** — Boot and firmware security *(Planned)*
+- **Stage 10** — Routing and fabric simulation *(Planned)*
+- **Stage 11** — Optional heterogeneous ARM node *(Planned)*
+- **Part C** — The signature end-to-end demonstration
+- **Appendices** — pacing, break-glass recovery, reading list, cost
+
+---
+
+## 1. Why This Exists, and What It Assumes
+
+Most "learn Kubernetes" or "learn HPC" tutorials run everything in one disposable VM or a cloud sandbox billed by the hour. That is fine for syntax, but it does not teach the things that come up in senior interviews and senior jobs: what happens when two physical hosts disagree about the network, what a GPU passthrough failure looks like at 1am, why your bootloader matters, why identity has to come before scheduling, or what a shared filesystem does to your jobs when it goes away mid-write.
+
+This guide uses **two physical machines** (one dedicated lab host, one that stays your daily driver) plus a **NAS** — enough hardware separation to make the networking, scheduling, and storage lessons real instead of simulated. A third spare box is a bonus, not a requirement; Stage 11 shows how to fold one in.
+
+**What you will need:**
+- One "lab" box you are willing to wipe and dedicate — ideally with a GPU, 16–32 GB RAM, and local SSD storage.
+- Your normal daily-driver machine, for administration and later as a second physical node for multi-host GPU work.
+- Optional: a NAS or any second machine with spare storage, for backups and shared-filesystem practice.
+- Optional: any additional spare computer — an old laptop, a mini PC, a Raspberry Pi 5, or an Apple Silicon Mac mini. If it is an ARM box, it unlocks an extra lesson (Stage 11).
+- Free and open-source software only.
+
+**The reference hardware**, so you can calibrate against your own:
 
 | Hardware | Role |
 |---|---|
-| Ryzen 3800X / RTX 2080 Ti / 32 GB RAM / two SATA SSDs (480 GB + 1 TB) | Dedicated Proxmox VE 9.2 host — call it `lab1` in what follows. |
-| Ryzen 7800X3D / RTX 4090 / 32 GB RAM workstation | Daily driver; later dual-boots Linux for multi-node GPU work. |
-| 6-bay NAS, ~24 TB usable | NFS backup/ISO target and shared storage practice. |
-| Mac mini M1 / 16 GB RAM | Optional auxiliary node — hosts a Linux VM that becomes the lab's **arm64** node in Stage 10. |
+| Ryzen 3800X / RTX 2080 Ti / 32 GB RAM / two SATA SSDs (480 GB + 1 TB) | Dedicated Proxmox VE host. |
+| Ryzen 7800X3D / RTX 4090 workstation | Daily driver; later dual-boots Linux for multi-node GPU work. |
+| 6-bay NAS, ~24 TB usable | NFS backup/ISO target and shared-storage practice. |
+| Mac mini M1 (doubles as a home-theater box) | Optional arm64 node (Stage 11). |
 
-One correction I had to make out loud to myself partway through, because it's a good reminder to verify your own hardware rather than trust labels: the 1 TB drive is a **Samsung 860 EVO, which is SATA, not NVMe** — despite "EVO" branding overlapping with Samsung's NVMe line. Know your actual bus speeds before you plan around them; it changes what you should expect and what bottlenecks first.
+One correction worth making out loud, because it is a good reminder to verify hardware rather than trust branding: the 1 TB drive here is a **Samsung 860 EVO, which is SATA, not NVMe** — the "EVO" name overlaps with Samsung's NVMe line. Know your actual bus speeds before planning around them; it changes what bottlenecks first.
 
 ---
 
-## 1. Architecture at a Glance
+## 2. Architecture
 
 ### Roles
 
 | Hardware | Role |
 |---|---|
-| Lab host (3800X/2080 Ti box) | Runs every VM. Whatever OS was on it before gets wiped. |
-| Daily-driver workstation | `ssh`, web UIs, `tofu`, `ansible`, `kubectl` from here. Later: dual-boots Linux as a second physical GPU node. |
-| NAS | NFS exports for backups/ISOs/templates, plus backing capacity for an object-storage stage later on. |
-| Spare box (optional; example: M1 Mac mini with 16 GB RAM) | Runs one Linux VM that joins the lab as an arm64 SLURM node and/or Kubernetes worker (Stage 10). Stays on the main LAN and can remain a part-time node. |
+| Lab host | Runs every VM. Whatever OS was on it before gets wiped. |
+| Daily-driver workstation | `ssh`, web UIs, `tofu`, `ansible`, `kubectl`. Later dual-boots Linux as a second physical GPU node. |
+| NAS | NFS exports for backups/ISOs/templates, plus backing capacity for the object-storage stage. |
+| Spare box (optional) | One Linux VM joins the lab as an arm64 node (Stage 11). |
 
 ### Networks
 
 | Bridge | Purpose | Subnet |
 |---|---|---|
-| `vmbr0` | Your real LAN. Internet, NAS, admin access. **Your router owns DHCP here — never run a second DHCP server on this bridge.** | Whatever your router uses — verify it (`ipconfig`/`ip route`), don't assume. |
-| `vmbr1` | Isolated cluster/provisioning network. VLAN-aware. The head node VM is its router/DHCP/DNS. | 10.10.0.0/24 |
-| `vmbr2` (later stage) | Routing-lab segment. | as designed later |
+| `vmbr0` | Your real LAN. Internet, NAS, admin access. **Your router owns DHCP here — never run a second DHCP server on this bridge.** | Whatever your router uses — verify it, do not assume. |
+| `vmbr1` | Isolated cluster/provisioning network. VLAN-aware. The head node VM routes it. | 10.10.0.0/24 |
+| `vmbr2` (Stage 10) | Routing-lab segment. | as designed later |
+
+### The lab at a glance
+
+```
+        HOME LAN  (your router owns DHCP)
+        |-- admin workstation   ssh / kubectl / tofu
+        |-- NAS                 NFS: backups, ISOs, templates
+        \-- arm-node1           optional; static route -> 10.10.0.0/24
+                 |
+   ==============|=========================================
+                 |
+   HYPERVISOR HOST  (Proxmox VE)
+   |
+   +- vmbr0 ---- bridged to LAN ---- head1:ens18
+   |                                    |
+   |                             [ NAT / ip_forward ]
+   |                                    |
+   \- vmbr1 ---- 10.10.0.0/24 ----- head1:ens19   10.10.0.1
+        |                             - dnsmasq  (DHCP / DNS / TFTP)
+        |                             - NFS  /home  /apps
+        |                             - slurmctld + slurmdbd
+        |
+        |-- node1..3     10.10.0.11-13   compute
+        |-- gpu-node1    10.10.0.21      GPU via vfio-pci  <-- host PCIe
+        |-- ipa1         10.10.0.5       FreeIPA / Kerberos / DNS
+        |-- k8s1..3      10.10.0.31-33   Kubernetes
+        \-- minio1       10.10.0.40      S3 object store
+```
+
+Two things this diagram is trying to make obvious. First, `vmbr1` has **no physical port and no host IP** — it is a pure virtual switch, which is why a DHCP server on it cannot leak onto your home LAN. Second, everything on the cluster network reaches the outside world through **one hop** (head1's NAT), which means head1 is both your convenience and your single point of failure — a realistic tradeoff worth feeling.
 
 ### Cluster IP plan (10.10.0.0/24), domain `hpc.internal`
 
 | Host | IP | Notes |
 |---|---|---|
-| head1 | 10.10.0.1 | dual-homed to vmbr0; NAT gateway, DHCP/DNS, slurmctld/slurmdbd |
+| head1 | 10.10.0.1 | dual-homed; NAT gateway, DHCP/DNS, slurmctld/slurmdbd, NFS |
 | ipa1 | 10.10.0.5 | identity stage |
 | node1–node4 | 10.10.0.11–.14 | compute nodes |
 | gpu-node1 | 10.10.0.21 | GPU passthrough VM |
 | k8s1–k8s3 | 10.10.0.31–.33 | Kubernetes stage |
 | minio1 | 10.10.0.40 | object storage stage |
 | DHCP/PXE pool | 10.10.0.100–.199 | on head1 |
-| arm-node1 (Linux VM on the spare box) | a **LAN** address, static or DHCP-reserved | optional, Stage 10 — reaches 10.10.0.0/24 via a static route through head1 |
+| arm-node1 | a LAN address | optional (Stage 11); routes to 10.10.0.0/24 via head1 |
 
-A note on naming: this guide uses `lab1.pve.hpc.internal` for the Proxmox host. `.internal` is an IANA-reserved TLD specifically meant for private networks like this (RFC 8375) — it won't resolve publicly and doesn't expose anything. Name yours whatever you like; the structure (`hostname.role.domain.internal`) is the part worth keeping.
+**A note on `.internal`:** the ICANN Board permanently reserved `.internal` from delegation in the public DNS root for private use, by resolution in July 2024 — so it will not collide with a real gTLD. (RFC 8375 is a different thing: it defines `home.arpa` for residential home networks. Either is a defensible choice; `.internal` is the one used throughout this guide.) Avoid `.local`, which collides with mDNS and will cause you real pain with SSSD and directory services later.
 
 ### Storage plan
 
-Local SSD/NVMe holds VM boot disks — VMs want fast local storage. The NAS gets NFS exports: one added to the hypervisor as a backup/ISO/template datastore, one reserved for later object-storage practice. Cluster `/home` and `/apps` are exported by the head node itself from a dedicated virtual disk — the classic HPC pattern of local scratch plus shared NFS for home/apps.
+Local SSD holds VM boot disks. The NAS provides NFS exports: one as the hypervisor's backup/ISO/template datastore, one reserved for the object-storage stage. Cluster `/home` and `/apps` are exported by the head node itself from a dedicated virtual disk — the classic HPC pattern of local scratch plus shared NFS, and the thing Stage 3 takes apart in detail.
 
 ### RAM budget
 
-Budget your build in "stages," not "everything running at once" — this is realistic anyway; production fleets manage capacity the same way. A rough split for a 32 GB host: hypervisor + capped ZFS cache ~5 GB, head node 4 GB, an identity VM 3 GB, three compute nodes at 2 GB each, one GPU-passthrough VM at 10 GB — leaving headroom. Swap compute nodes out for Kubernetes nodes when you move to that stage, rather than running both simultaneously.
+Budget in **stages, not simultaneity** — this is realistic anyway, since production fleets manage capacity the same way. A rough split for a 32 GB host: hypervisor plus capped ZFS cache ~5 GB, head node 4 GB, identity VM 3 GB, three compute nodes at 2 GB each, one GPU-passthrough VM at 10 GB. Swap the compute nodes out for Kubernetes nodes when you reach that stage rather than running both.
 
 ---
 
-# Part A — Hypervisor Deployment Runbook (Proxmox VE 9.2)
+# Part A — Hypervisor Deployment Runbook  `[Validated]`
 
-Budget one evening for A1–A7, one dedicated evening for A8 (GPU passthrough — the fiddliest single step), one more for A9–A10.
+Proxmox VE. Budget one evening for A1–A8, one dedicated evening for A9 (GPU passthrough — the fiddliest single step), one more for A10–A11.
 
 ## A1. Prep, USB, BIOS
 
-1. Download the **Proxmox VE** ISO from proxmox.com and verify its SHA256 checksum.
-2. Write it to USB in **raw/DD mode** — Rufus ("DD Image mode" when prompted), balenaEtcher, or `dd`. Avoid Ventoy for this particular ISO; it has a history of quirks with Proxmox specifically.
-3. **If your lab box has more than one drive and any of them has an old OS on it, decide your storage layout before you touch the installer.** I initially installed to the wrong drive by accident, with a forgotten old OS install sitting on a second drive I hadn't accounted for — which created boot ambiguity I had to clean up afterward (documented in A3, so you can learn from it without repeating it). The cleanest prevention, if you have multiple drives: **physically disconnect every drive except your install target** before booting the installer. It removes an entire category of mistake for the cost of one cable.
-4. BIOS settings (naming varies by board; this is AMD-typical):
-   - **SVM Mode: Enabled** (virtualization extensions)
-   - **IOMMU: Enabled**, set explicitly rather than left on "Auto" — this matters later for GPU passthrough
-   - **CSM: Disabled** — pure UEFI boot
-   - **fTPM: Enabled** — gives you a TPM 2.0 for later boot-security experiments
-   - Fast Boot off
+1. Download the **Proxmox VE** ISO and verify its SHA256 checksum.
+2. Write it to USB in **raw/DD mode** — Rufus ("DD Image mode" when prompted), balenaEtcher, or `dd`. Avoid Ventoy for this ISO specifically; it has a history of quirks with it.
+3. **If your lab box has more than one drive and any of them holds an old OS, decide your storage layout before touching the installer.** On the reference build, an old forgotten Windows install on a second drive created boot ambiguity that took a session to clean up (documented in A3 and A4 so you can skip the experience). The cleanest prevention with multiple drives: **physically disconnect every drive except your install target** before booting the installer. One cable removes an entire category of mistake.
+4. BIOS settings (names vary by vendor; these are AMD-typical):
+   - **SVM Mode: Enabled** — virtualization extensions.
+   - **IOMMU: Enabled**, set explicitly rather than left on "Auto" — required for GPU passthrough in A9.
+   - **CSM: Disabled** — pure UEFI boot.
+   - **fTPM: Enabled** — *optional*. This gives the **physical host** a TPM 2.0. Note that the boot-security work in Stage 9 happens inside VMs using a **virtual** TPM (`tpmstate0`), which does not depend on host fTPM at all. Enable host fTPM only if you intend to do measured-boot experiments on the bare-metal host itself.
+   - Fast Boot: off.
 
 ## A2. Install
 
-1. Boot the USB. Either the Graphical or Terminal UI installer produces an identical result — pick Graphical unless your hardware is console-only, since the console disappears anyway once you're done here (managed headlessly from here on).
-2. Target disk: your chosen boot drive. Filesystem: **ZFS (RAID0)** if it's a single disk — despite the name, this just means "one vdev, no redundancy," which is the only valid choice with one drive. Durability for this lab lives in scheduled backups (A10), not disk mirroring.
-3. If the installer's Advanced Options exposes a ZFS ARC max setting, set it modestly (2–3 GB is plenty for a lab-sized pool) — and double-check the units shown (MiB vs GiB) before accepting; it's an easy field to misread.
-4. Country/timezone, a strong root password, a real email.
-5. Management network: a static IP on your LAN. **Verify your actual gateway first** (`ipconfig` on Windows, `ip route | grep default` on Linux/Mac) rather than assuming — don't guess a common default and hope.
+1. Boot the USB. Graphical and Terminal UI installers produce identical results — pick Graphical unless your hardware is console-only. Either way this is the last time you will use a local console; everything after is web UI and SSH.
+2. Target disk: your chosen boot drive. Filesystem: **ZFS (RAID0)** if it is a single disk — despite the name, that means "one vdev, no redundancy," which is the only valid single-drive choice. Durability for this lab comes from scheduled backups (A11), not disk mirroring.
+3. If the installer's Advanced Options exposes a ZFS ARC maximum, set it modestly (2–3 GB is plenty for a lab-sized pool) — and check the units shown (MiB vs GiB) before accepting; that field is easy to misread by a factor of 1024 in either direction.
+4. Country/timezone, a strong root password, a real email address.
+5. Management network: a static IP on your LAN. **Verify your actual gateway first** (`ipconfig` on Windows, `ip route | grep default` on Linux or macOS) rather than assuming a common default.
 6. Reboot, remove the USB.
 
-## A3. First boot — two fixes worth knowing before you hit them blind
+## A3. First boot — two fixes worth knowing before hitting them blind
 
-**If your screen goes black right after kernel handoff:** this is a known rough edge on some NVIDIA cards (particularly Turing-generation, e.g. the 2080 Ti) — the card's firmware-level display output works fine through the boot menu, but the Linux kernel's own framebuffer driver can fail the handoff. The fix: at the boot menu, press `e` to edit, append `nomodeset` to the kernel line, boot once to confirm it resolves the issue, then make it permanent.
+**If the screen goes black right after kernel handoff:** a known rough edge on some NVIDIA cards (Turing generation, e.g. the 2080 Ti, is a common case). The card's firmware-level output drives the boot menu fine, but the kernel's own framebuffer driver can fail the handoff. At the boot menu press `e`, append `nomodeset` to the kernel line, and boot once to confirm that fixes it.
 
-Find out which bootloader you're actually running first:
+To make it permanent, first find out which bootloader is actually in use:
+
 ```bash
 proxmox-boot-tool status
 ```
-If it reports **systemd-boot** (typical for a ZFS-root install):
+
+This reports either `uefi` or `grub` — **`uefi` is Proxmox's label for a systemd-boot-managed ESP**, which is typical for a ZFS-root UEFI install. It does not print the string "systemd-boot," so do not go looking for it.
+
+For the `uefi` (systemd-boot) case:
 ```bash
 nano /etc/kernel/cmdline
-# append nomodeset to the single existing line, e.g.:
+# append to the single existing line, e.g.:
 # root=ZFS=rpool/ROOT/pve-1 boot=zfs nomodeset
 proxmox-boot-tool refresh
 ```
-If it reports **GRUB** instead, the same edit goes in `/etc/default/grub`'s `GRUB_CMDLINE_LINUX_DEFAULT` line, followed by `update-grub`.
+For the `grub` case, the same edit goes in `/etc/default/grub` under `GRUB_CMDLINE_LINUX_DEFAULT`, followed by `update-grub`.
 
-Cold power-cycle (not just a warm reboot) to confirm it holds automatically.
+Cold power-cycle (not a warm reboot) to confirm it holds by itself.
 
-**If you have leftover boot entries from a previous OS install** (a common byproduct of reusing hardware): your UEFI boot menu may show multiple entries — the new Linux one, a stale Windows Boot Manager pointing at nothing useful, and sometimes a generic "UEFI OS" fallback. Clean it up from inside the running hypervisor:
+**If you have leftover boot entries from a previous OS install** — a common byproduct of reusing hardware — your UEFI boot menu may show several: the new Linux entry, a stale Windows Boot Manager pointing at nothing useful, and sometimes a generic "UEFI OS" fallback. That ambiguity is what causes a machine to boot the wrong thing intermittently. Clean it from the running hypervisor:
+
 ```bash
-efibootmgr -v              # lists all entries by Boot number; identify which is which
-efibootmgr -b XXXX -B      # deletes a specific stale entry
-efibootmgr -o YYYY,ZZZZ    # sets your desired boot order, correct entry first
+efibootmgr -v              # list all entries with Boot numbers; identify each
+efibootmgr -b XXXX -B      # delete a specific stale entry
+efibootmgr -o YYYY,ZZZZ    # set boot order, correct entry first
 ```
-Do this only after any old OS on another drive has actually been wiped (next step) — no point deleting an entry for a still-bootable install twice.
+
+Do this only after any old OS on another drive has actually been wiped (A4).
 
 ## A4. Wiping and repurposing a second drive, safely
 
-If you have a second local drive that previously held another OS (my case: an old Windows install on a second SSD I'd forgotten about), here's the safe way to reclaim it — whether you're doing this before or after the main install.
+If a second local drive previously held another OS, here is the safe reclaim — and the order matters more than the commands do.
 
-**If doing it before install, from the installer's Debug Mode shell:** most Proxmox installers have an "Advanced Options" submenu (easy to scroll past) offering a **Debug Mode** variant of the install. Booting it drops you into an early root shell — type `exit` once to reach a second, fuller shell with disk tools available — do your wipe there, `exit` again to continue into the normal installer.
+**Before install, from the installer's Debug Mode shell:** most Proxmox installers have an **Advanced Options** submenu (easy to scroll past) with a **Debug Mode** install variant. Booting it drops you into an early root shell; type `exit` once to reach a second, fuller shell with disk tools available; do the wipe there; `exit` again to continue into the normal installer.
 
-**If doing it after install, from the running hypervisor shell:**
+**After install, from the running hypervisor shell:**
 ```bash
-lsblk -o NAME,SIZE,MODEL,SERIAL     # positively identify the drive by its listed size and model — don't guess from letter alone
-zpool import                          # if an old ZFS pool is importable, note it — do NOT import it
-zpool labelclear -f /dev/sdX3        # ZFS keeps label copies at the end of the partition; a Proxmox-style install usually put its pool on partition 3 — confirm with lsblk first
-sgdisk --zap-all /dev/sdX            # destroys the partition table on the whole disk
-wipefs -a /dev/sdX                    # clears any residual filesystem/RAID/ZFS signatures
+lsblk -o NAME,SIZE,MODEL,SERIAL   # identify the drive by size and model — never by letter alone
+zpool import                       # if an old ZFS pool shows as importable, note it — do NOT import
+zpool labelclear -f /dev/sdX3      # ZFS label copies live at the END of the partition too;
+                                   # a Proxmox-style install usually put its pool on partition 3
+sgdisk --zap-all /dev/sdX          # destroy the partition table (whole disk, no partition number)
+wipefs -a /dev/sdX                 # clear residual filesystem/RAID/ZFS signatures
 ```
-Substitute your actual device (`/dev/sdX`) — confirm it with `lsblk` every single time before running anything destructive; there's no undo here. Note this is a metadata wipe, not a full-disk erase — it runs in seconds because it only needs to remove the small structures (partition table, filesystem signatures, ZFS labels) that make the old layout discoverable, not overwrite the actual data. That's sufficient for reuse; if you need a forensic-grade wipe, reach for `blkdiscard` (fast on SSDs) instead.
 
-**Why this order matters if you're doing the main install first:** installing to drive A while an old pool still exists, unwiped, on drive B creates a window where two ZFS pools can claim the same pool name during the *next* boot — which can produce ambiguous or failed imports. Wiping the second drive **before** first boot (via Debug Mode) sidesteps this category of problem entirely; physically disconnecting it during install is the even simpler version of the same idea.
+Substitute your real device and confirm with `lsblk` every time; there is no undo. This is a **metadata wipe, not a full erase** — it completes in seconds because it only removes the structures that make the old layout discoverable (partition table, filesystem signatures, ZFS labels), not the underlying data. That is sufficient for reuse. For a forensic-grade wipe, use `blkdiscard` (fast on SSDs) instead.
+
+**Why the order matters:** installing to drive A while an old pool still exists unwiped on drive B creates a window where two ZFS pools can claim the same pool name (`rpool`) at the *next* boot. Best case you get ambiguity errors; worst case an import fails and you land in an initramfs shell. Wiping drive B *before* first boot avoids the entire class. Physically disconnecting it during install is the simpler version of the same idea.
+
+If you do end up at that initramfs prompt: `zpool import` with no arguments lists both pools with numeric IDs, then `zpool import -N <numeric-id-of-the-correct-pool> rpool` and `exit` continues the boot.
 
 ## A5. Post-install configuration
 
-1. **Repositories:** disable the enterprise repo, enable the no-subscription one (GUI: *Datacenter → your host → Updates → Repositories*), then `apt update && apt full-upgrade -y`.
-2. **ZFS ARC cap**, if not already set in the installer:
+1. **Repositories:** disable the enterprise repo, enable the no-subscription repo (GUI: *Datacenter → your host → Updates → Repositories*), then `apt update && apt full-upgrade -y`.
+2. **ZFS ARC cap**, if not set during install:
 ```bash
-echo "options zfs zfs_arc_max=3221225472" > /etc/modprobe.d/zfs.conf   # 3 GB, adjust to taste
-update-initramfs -u -k all        # required since root lives on ZFS
+echo "options zfs zfs_arc_max=3221225472" > /etc/modprobe.d/zfs.conf   # 3 GB; adjust to taste
+update-initramfs -u -k all        # required — root is on ZFS, so this must ride in the initramfs
+# after reboot, confirm:  arc_summary | grep -A2 "ARC size"
 ```
 3. **Sanity checks:**
 ```bash
-dmesg | grep -i -e AMD-Vi -e IOMMU     # expect interrupt-remapping lines — confirms IOMMU is actually active
+dmesg | grep -i -e AMD-Vi -e IOMMU     # interrupt-remapping lines confirm IOMMU is genuinely active
 pvesm status
 zfs list
 ```
 
 ## A6. Claiming a second drive as VM storage
 
-If you have a second drive, dedicate it entirely to VM disks rather than sharing the boot drive — this gives your VMs faster, cleaner storage and keeps the hypervisor's own root filesystem in its own small, independent failure domain.
+Dedicate the second drive entirely to VM disks rather than sharing the boot drive. This gives VMs their own bandwidth and puts the hypervisor's root filesystem in an independent failure domain — separate reinstall paths, separate blast radius.
+
 ```bash
 zpool create -o ashift=12 vmdata /dev/sdX
 zfs set compression=lz4 vmdata
 pvesm add zfspool vmdata --pool vmdata --content images,rootdir --sparse 1
 ```
-From here on, when creating any VM, explicitly choose this pool as its storage target rather than the default pool living on your boot drive.
+
+From here on, explicitly choose this pool as the storage target for every VM you create, rather than the default pool on your boot drive.
 
 ## A7. Bridges
 
-Add the isolated cluster bridge (the main LAN bridge exists already from install):
+The LAN bridge exists from install. Add the isolated cluster bridge:
+
 ```
 auto vmbr1
 iface vmbr1 inet manual
@@ -183,28 +269,46 @@ iface vmbr1 inet manual
         bridge-vlan-aware yes
         bridge-vids 2-4094
 ```
-Apply with `ifreload -a`. It deliberately has no host IP and no physical port — a pure virtual switch; a VM you build later will act as its router, which is also why any DHCP server you run on it can never leak onto your real LAN.
+
+Apply with `ifreload -a`. No host IP, no physical port — a pure virtual switch.
+
+**Pin your interface names now, before adding any NICs later.** Predictable naming (`enp6s0`, etc.) is stable across reboots but keyed to PCI topology, so it can shift when you add or move a card. A shifted name means your bridge references a port that no longer exists — which looks like a network outage but is really an identity mismatch, the same category of mistake as trusting a drive letter. Fix it once with `.link` files keyed to MAC address:
+
+```bash
+ip -o link show                     # list interfaces
+ip link show <iface>                # note the link/ether MAC
+
+cat > /etc/systemd/network/10-lan0.link <<'EOF'
+[Match]
+MACAddress=aa:bb:cc:dd:ee:ff
+[Link]
+Name=lan0
+EOF
+```
+
+Semantic names pay off later (`lan0`, `cluster0`, `rdma0`). Update `/etc/network/interfaces` to match and reboot once so `systemd-udevd` applies the rename.
 
 ## A8. NAS and ISOs
 
-1. On your NAS, create two NFS exports — one for the Proxmox datastore, one held in reserve for later object-storage practice.
+1. On the NAS, create two NFS exports — one for the hypervisor datastore, one held in reserve for the object-storage stage. Restrict them to the hypervisor's IP where the UI allows.
 2. `pvesm add nfs nas-pve --server <NAS-IP> --export /nfs/pve --content backup,iso,vztmpl`
-3. Pull ISOs (GUI: *→ ISO Images → Download from URL*): a recent Ubuntu Server LTS release, and a recent Rocky/AlmaLinux minimal release if you'll want RPM-based identity tooling later.
+3. Pull ISOs (GUI: *→ ISO Images → Download from URL*): a recent Ubuntu Server LTS, and a Rocky/AlmaLinux minimal if you plan to run RPM-based identity tooling in Stage 6. Keep local copies too, so template work does not depend on NAS health.
+4. Expectation setting: a NAS behind gigabit tops out near 112 MB/s. Every time that annoys you, it is the visceral argument for why production storage networks run at 100/200/400 GbE — and Stage 3 turns that annoyance into measurements.
 
 ## A9. GPU passthrough (its own evening)
 
-If your lab host has no integrated graphics, once the GPU is claimed for passthrough its local console goes dark permanently — that's expected, and it's why this whole lab is designed to be managed over SSH and the web UI from here on.
+If your lab host has no integrated graphics, the local console goes dark permanently once the GPU is claimed for passthrough. That is expected and is why the lab is designed to be managed over SSH and the web UI.
 
-1. **Map IOMMU groups:**
+1. **Map the IOMMU groups:**
 ```bash
 for g in /sys/kernel/iommu_groups/*; do
   echo "Group ${g##*/}:"
   for d in "$g"/devices/*; do echo -e "\t$(lspci -nns "${d##*/}")"; done
 done
 ```
-Modern NVIDIA cards are typically **multi-function devices** — VGA, HDMI audio, sometimes a USB-C controller — and ideally all functions sit in one clean IOMMU group. Consumer AMD boards are usually clean here; if yours aren't, check for an "ACS Enable" BIOS option before resorting to more invasive kernel-patch workarounds.
+Modern NVIDIA cards are **multi-function devices** — VGA, HDMI audio, and on Turing and later often a USB-C controller and its UCSI companion. Ideally all functions sit alone in one IOMMU group. Consumer AMD boards are usually clean; if yours are not, look for an "ACS Enable" BIOS option before considering the ACS-override kernel patch — and understand why that patch is a security compromise (it asserts DMA isolation the hardware does not actually guarantee).
 
-2. **Cmdline:** append `iommu=pt` to whatever kernel cmdline file you're already using (same file as the `nomodeset` fix above), then re-apply (`proxmox-boot-tool refresh` or `update-grub`, matching your bootloader).
+2. **Kernel cmdline:** append `iommu=pt` to the same file you used for `nomodeset` in A3, then re-apply (`proxmox-boot-tool refresh`, or `update-grub` on a GRUB system).
 
 3. **Bind the card to vfio:**
 ```bash
@@ -222,21 +326,22 @@ blacklist nvidia_drm
 EOF
 
 cat > /etc/modprobe.d/vfio.conf <<'EOF'
-options vfio-pci ids=<your PCI IDs from lspci -nn, comma-separated> disable_vga=1
+options vfio-pci ids=<PCI IDs from lspci -nn, comma-separated> disable_vga=1
 softdep nouveau pre: vfio-pci
 softdep nvidia pre: vfio-pci
 EOF
 
 update-initramfs -u -k all && reboot
 ```
+(Older guides list `vfio_virqfd`; it merged into vfio core in kernel 6.2+.)
 
-4. **Verify:** `lspci -nnk -s <bus:device>` should show `Kernel driver in use: vfio-pci` for every function of the card.
+4. **Verify:** `lspci -nnk -s <bus:device>` should report `Kernel driver in use: vfio-pci` for **every** function of the card.
 
-5. **Know your way back:** if you ever need the local console again, boot-menu edit → append `modprobe.blacklist=vfio_pci` for that one boot. vfio never binds, the normal framebuffer driver takes over, console returns.
+5. **Know your way back.** If you need the local console again, edit the boot entry and append `modprobe.blacklist=vfio_pci` for that one boot: vfio never binds, the normal framebuffer driver takes over, console returns. Learn this before you need it.
 
-## A10. Build the GPU VM and a reusable template
+## A10. The GPU VM and a reusable template
 
-**GPU passthrough VM** (adjust IDs/paths to your environment):
+**GPU passthrough VM** (adjust IDs and paths):
 ```bash
 qm create 201 --name gpu-node1 --machine q35 --bios ovmf --cpu host \
   --cores 6 --memory 10240 --balloon 0 \
@@ -247,9 +352,12 @@ qm set 201 --tpmstate0 vmdata:1,version=v2.0
 qm set 201 --ide2 nas-pve:iso/<your-ubuntu-iso>,media=cdrom
 qm set 201 --hostpci0 <bus:device>,pcie=1
 ```
-`--balloon 0` and fixed memory are mandatory — passthrough pins guest memory, so ballooning does nothing useful and just wastes host RAM accounting. Leave the default virtual display attached alongside the GPU so you keep a fallback console via noVNC; it doesn't interfere with CUDA. Inside the guest: install the vendor's recommended server-branch driver, confirm with `nvidia-smi` (or the equivalent for your GPU vendor).
 
-**Cloud-init template**, so every future VM clones instead of hand-installing:
+Details that matter: `--balloon 0` with fixed memory is **mandatory** — passthrough pins guest memory, so ballooning accomplishes nothing and only confuses host accounting. Specifying the PCI address without a function suffix passes **all** functions of a multi-function card. Keep the default virtual display alongside the GPU so noVNC stays available as a fallback console; CUDA does not care which display is primary. The `tpmstate0` line gives this VM a **virtual** TPM 2.0 — this, not host fTPM, is what Stage 9's measured-boot work uses.
+
+Inside the guest, install the vendor's recommended server-branch driver and confirm with `nvidia-smi`.
+
+**Cloud-init template**, so future VMs clone instead of being hand-installed:
 ```bash
 cd /var/lib/vz/template
 wget https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
@@ -264,206 +372,397 @@ qm set 9000 --boot order=scsi0 --serial0 socket --vga serial0 --ipconfig0 ip=dhc
 qm set 9000 --ciuser <you> --sshkeys /root/<your-pubkey>.pub
 qm template 9000
 ```
-Test with `qm clone 9000 150 --name scratch1 --full` — it should boot in seconds and accept your SSH key immediately.
+
+Test with `qm clone 9000 150 --name scratch1 --full`: it should boot in seconds and accept your key. Then `qm destroy 150`.
 
 ## A11. Backups
 
-Configure scheduled backups to your NAS datastore (weekly, zstd compression, snapshot mode is usually sufficient for a lab). **Do one restore drill before moving on** — a backup you've never restored is a rumor, not a safety net.
+Schedule backups to the NAS datastore (weekly, zstd, snapshot mode is fine for a lab), plus an occasional manual dump to local storage as an on-box copy.
 
-**Part A is done when:** the host boots hands-free to a console with no manual intervention; any old boot-menu entries are cleaned up; a second drive (if present) is dedicated purely to VM storage; the isolated bridge is up; the NAS datastore is mounted; your GPU shows `vfio-pci` on every function; `nvidia-smi` (or equivalent) is clean inside the passthrough VM; a template clone boots and accepts your key; one backup has been successfully restored.
+**Do one restore drill before moving on.** A backup you have never restored is a rumor, not a safety net. This is also a question you should hope an interviewer asks.
+
+**Part A exit criteria:** hands-free cold boot to a console with no manual intervention; stale boot entries cleaned; ARC capped and confirmed; second drive dedicated to VM storage; isolated bridge up and VLAN-aware; interface names pinned; NAS datastore mounted; every GPU function on `vfio-pci`; `nvidia-smi` clean inside the passthrough VM; a template clone boots and accepts your key; one backup successfully restored.
 
 ---
 
 # Part B — Study Stages
 
-Each stage below builds one coherent skill area and ends with a handful of **self-test questions** — the kind of thing a technical interviewer would actually ask, or that you should be able to answer cold if this is genuinely your area of expertise. Treat them as checkpoints, not homework.
+Each stage builds one coherent skill area and closes with **self-test questions** — the kind a technical interviewer actually asks. Several stages also include a **deliberate failure** exercise: breaking something on purpose and watching exactly how it fails is worth more than three successful runs, and it is the difference between "I installed this" and "I operate this."
 
-## Stage 1 — Linux and Python fundamentals (start here, keep going throughout)
+## Stage 1 — Linux and Python Fundamentals  `[In progress — ongoing]`
 
-This is the foundation everything else sits on, and it needs no lab at all — you can start today.
+The foundation everything else assumes. Needs no lab; start today.
 
-Daily practice: pick a fundamentals topic, explain it out loud as if to an interviewer, then verify. Non-negotiable topics:
-- Boot flow on a UEFI Linux box: firmware → bootloader → kernel → init, and who verifies what at each stage.
-- `ssh host` end-to-end: DNS resolution, TCP handshake, key exchange, authentication, pty allocation, shell.
-- `/proc` exploration, `strace` on a misbehaving command, signals, zombie vs. orphan processes, the difference between page cache and buffers in `free` output, the cgroup v2 hierarchy under `/sys/fs/cgroup`.
-- Concurrency in Python for systems work — three facts worth knowing precisely rather than approximately: **CPython's `hashlib` releases the GIL for buffers above roughly 2 KB**, so threaded hashing of multiple files genuinely parallelizes across cores despite the GIL; **`ProcessPoolExecutor.map()` is lazy and returns results in input order, so one slow item blocks everything behind it, and an exception in any worker propagates at the point you consume that result** — `as_completed()` with per-future error handling is the more resilient pattern; **a second run over the same data being much faster is almost always the OS page cache at work**, and that speedup breaks down once your working set exceeds available RAM, when data lives behind a cold storage tier, or when the second run happens to land on a different machine with a cold cache.
-- Practice katas: a streaming log parser that never loads the whole file into memory, a parallel file-checksum tool (try both a thread-pool and a process-pool version, and be able to argue for one depending on where the files actually live — local NVMe vs. a network share changes the right answer), a `subprocess` wrapper with proper timeout and retry handling.
+Daily practice: pick a topic, explain it aloud as if to an interviewer, then verify. Core topics:
 
-**Self-test:** Walk through everything that happens between pressing the power button and seeing a login prompt on a UEFI Linux machine. Explain why threaded file-hashing can outperform sequential hashing despite the GIL. What's the difference between `executor.map()` and `as_completed()`, and when does it matter? Why might a second identical run of a data-processing job be dramatically faster than the first — and under what conditions would that stop being true?
+- **Boot flow on a UEFI Linux machine:** firmware → bootloader → kernel → init, and who verifies what at each step. (Part A's `nomodeset` and boot-entry cleanup give you a first-person story here.)
+- **`ssh host` end to end:** DNS resolution, TCP handshake, key exchange, authentication, pty allocation, shell.
+- **Process and memory internals:** `/proc` exploration, `strace` on a misbehaving command, signals, zombie vs orphan processes, page cache vs buffers in `free`, and the cgroup v2 hierarchy under `/sys/fs/cgroup`.
+- **Concurrency in Python for systems work.** Three facts worth knowing precisely rather than approximately:
+  1. **CPython's `hashlib` releases the GIL** for buffers above roughly 2 KB, so threaded hashing of multiple files genuinely parallelizes across cores. This is one of the handful of "CPU-bound work that threads handle fine" exceptions, because the heavy lifting happens in a C extension that drops the lock.
+  2. **`Executor.map()` yields results in input order**, which creates head-of-line blocking during consumption — one slow item delays everything behind it. It also submits or collects work more eagerly than people expect (the input iterable is consumed up front unless you use the newer `buffersize` parameter), so it is not simply "lazy." `submit()` plus `as_completed()` gives you explicit per-task completion and per-task error handling, which is what you want for anything fleet-scale.
+  3. **A second run over the same data being much faster is almost always the OS page cache.** That speedup disappears when the working set exceeds RAM, when data sits behind a cold tier (tape, object storage, a spun-down array), or when the second run lands on a different machine with a cold cache.
+- **Practice katas:** a streaming log parser that never loads the whole file; a parallel file-checksum tool built both ways (thread pool and process pool) with an argument for which is right *given where the files actually live* — local NVMe and a gigabit NAS have different answers; a `subprocess` wrapper with real timeout and retry handling.
 
-## Stage 2 — Build a SLURM-scheduled compute cluster
+**Self-test:** Walk through everything between pressing the power button and a login prompt on a UEFI Linux machine. Why can threaded file-hashing outperform sequential hashing despite the GIL? What exactly differs between `Executor.map()` and `submit()` + `as_completed()`, and when does that difference bite? Why might a second identical run of a data-processing job be dramatically faster — and under what three conditions would it not be?
 
-Clone VMs from your template rather than hand-installing each one — this is both faster and closer to how real fleets actually get built.
+## Stage 2 — SLURM: Build It, Then Operate It  `[Designed]`
 
-- **Head node**: a VM with a second NIC on the isolated bridge, running as the cluster's router (NAT for outbound internet), DHCP/DNS server (`dnsmasq` is simple and effective for a lab), and NFS server exporting `/home` and `/apps` to the rest of the cluster.
-- Clone 3–4 lightweight "compute node" VMs.
-- Install **SLURM** (`slurm-wlm` from your distro's repos is fine for lab purposes): `slurmctld` + `slurmdbd` + a small database on the head node. Configure `SelectType=select/cons_tres` with `SelectTypeParameters=CR_Core_Memory` for combined core/memory-aware scheduling, `ProctrackType=proctrack/cgroup` so jobs are actually fenced by cgroups rather than trusted to behave, and a `gpu` partition once your GPU VM is available (a manual `gres.conf` entry is often necessary since distro SLURM builds don't always ship with GPU auto-detection compiled in).
-- Add Lmod and a small module tree with Apptainer/Singularity for containerized workloads — this mirrors how most real HPC shops manage software across many users and dependency versions.
+Clone VMs from your template rather than hand-installing — faster, and closer to how real fleets are built.
 
-**Self-test:** What does cgroup v2 actually do when a job exceeds its memory limit — walk through the mechanism, not just the outcome. Trace a job from `sbatch` submission to a running process across `slurmctld`, `slurmd`, and `slurmstepd`. Why choose `CR_Core_Memory` over core-only scheduling? What goes wrong with a shared NFS home directory under `root_squash`, and why does that setting exist?
+### 2a. Build the cluster
 
-## Stage 3 — RDMA, MPI, and GPU-to-GPU communication concepts
+- **Head node:** a VM with a second NIC on the isolated bridge, acting as the cluster's router (NAT for outbound), DHCP/DNS server (`dnsmasq` is simple and sufficient), and NFS server exporting `/home` and `/apps`.
+- Clone 3–4 lightweight compute node VMs.
+- Install SLURM (`slurm-wlm` from your distro is fine for a lab): `slurmctld` plus `slurmdbd` and a small database on the head node.
 
-This is the stage that converts "I've heard of RDMA/InfiniBand" into something you've actually measured — you won't have real RDMA hardware in a typical home lab, but you can build genuine intuition for the concepts and the software stack around them.
+**Resource enforcement — get this right, because the common version is incomplete.** `ProctrackType=proctrack/cgroup` tracks processes, but tracking is not enforcing. To actually constrain what a job can use you need the task plugin and the cgroup constraints together. In `slurm.conf`:
 
-1. **OpenMPI under SLURM.** Run the OSU microbenchmarks (`osu_latency`, `osu_bw`, `osu_allreduce`) between your compute nodes over plain TCP first, and record the numbers as a baseline.
-2. **Soft-RoCE** — the trick that makes real RDMA verbs programming possible without special hardware. Any Ethernet NIC can host a software RoCEv2 implementation:
+```ini
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+ProctrackType=proctrack/cgroup
+TaskPlugin=task/cgroup,task/affinity
+JobAcctGatherType=jobacct_gather/cgroup
+```
+
+And in `cgroup.conf`:
+
+```ini
+CgroupPlugin=autodetect
+ConstrainCores=yes
+ConstrainRAMSpace=yes
+ConstrainDevices=yes
+```
+
+`ConstrainDevices=yes` is what makes `--gres=gpu:1` mean something — without it a job can see every GPU on the node regardless of what it requested.
+
+- Add Lmod with a small module tree and Apptainer for containerized workloads.
+- A `gpu` partition once your GPU VM exists. Note that distro SLURM builds are frequently **not** compiled against NVML, so `AutoDetect=nvml` in `gres.conf` may silently fail; a manual `gres.conf` entry (`Name=gpu File=/dev/nvidia0`) is the honest fallback, and knowing that build-flag nuance is itself a good interview answer.
+
+**Deliberate failure — memory enforcement.** Submit a job with `--mem=512M` that allocates 2 GB. Then observe the full picture: `dmesg` for the kernel OOM message naming the cgroup, `sacct -j <id> --format=JobID,State,ExitCode,MaxRSS` for how SLURM records it, and the cgroup's own `memory.events` counters. Then do the more interesting version: run the same overallocation inside a **multi-rank step** and watch whether the entire step dies or just the offending rank — that behavior, and how to change it, is a real production conversation.
+
+### 2b. Operate the scheduler
+
+Building SLURM proves jobs can run. Operating it is what separates "I installed a scheduler" from "I run a shared compute service," and it is where senior interviews go. Work through:
+
+- **Accounting structure:** `sacctmgr` accounts, users, and associations. Build a small hierarchy (two labs, several users) and understand what an association actually is.
+- **Fairshare:** set differing shares between accounts, submit competing workloads, and watch priority evolve with `sprio` and `sshare`. Explain why a heavy recent user drops in priority.
+- **QOS:** create two or three (e.g. `normal`, `high`, `debug`) with different limits, priorities, and preemption behavior. Enforce per-user and per-account limits (`MaxJobs`, `MaxTRES`, `GrpTRES`).
+- **Preemption:** configure a high-priority QOS that preempts a low-priority one. Then the realistic wrinkle: make the low-priority jobs checkpoint-friendly so preemption suspends or requeues rather than destroying work.
+- **Backfill:** understand how `sched/backfill` fills gaps ahead of large pending jobs, why accurate `--time` limits are what make it work, and what happens to throughput when everyone requests the maximum walltime.
+- **Reservations:** create a maintenance reservation, watch it drain scheduling, and use a reservation to hold nodes for a specific account.
+- **Job arrays:** submit a 500-task array; understand throughput differences vs 500 individual submissions, and how array tasks appear in accounting.
+- **Node lifecycle:** `scontrol update NodeName=... State=DRAIN Reason="..."`, resume, and the DOWN/DRAINED/FAIL states. Configure a `HealthCheckProgram` that marks a node DOWN on a synthetic failure, then recover it.
+- **GRES failure handling:** simulate a GPU disappearing (stop the VM, or unbind the device) and watch what happens to queued and running GPU jobs.
+- **Accounting reports:** `sacct` for jobs, `sreport` for utilization by account and user over a window. Answer "who used what last month" without hand-editing anything.
+- **Controller and database recovery:** know what `StateSaveLocation` holds, then practice losing it — stop `slurmctld`, move the directory aside, restart, and watch what happens to the running and queued workload. Separately, stop `slurmdbd` while jobs run and observe how accounting catches up when it returns.
+
+**Self-test:** What does cgroup v2 actually do when a job exceeds its memory limit — mechanism, not outcome? Trace a job from `sbatch` to running process across `slurmctld`, `slurmd`, and `slurmstepd`. Why is tracking (`proctrack`) insufficient without `task/cgroup`? Explain fairshare to a researcher who thinks the scheduler is broken because their job is behind someone else's. Why do accurate walltime requests improve *everyone's* throughput under backfill? What breaks on a shared NFS home directory under `root_squash`, and why does that setting exist at all? You lost `StateSaveLocation` — what is recoverable and what is not?
+
+## Stage 3 — HPC Storage: Metadata, Failure Modes, and Parallel Filesystems  `[Designed]`
+
+A guide with HPC in the title cannot treat storage as "we exported `/home` over NFS." Storage is where most real HPC support tickets originate, where the least intuitive failures live, and where senior candidates separate themselves — because almost everyone can describe a filesystem, and very few can explain what happens to 500 running jobs when the metadata server stops answering.
+
+This stage is deliberately placed right after the scheduler, because Stage 2 just gave you shared `/home` and `/apps` and you should understand what you actually built.
+
+### 3a. The distinction that explains everything: metadata vs data
+
+Every filesystem operation is either **data** (read/write bytes in a file) or **metadata** (create, stat, open, rename, unlink, chmod, directory listing). They scale completely differently, they bottleneck on different hardware, and conflating them is the single most common source of "the filesystem is slow" misdiagnoses.
+
+Make it concrete on your NFS share:
+
+```bash
+# data path: one big file, sequential
+fio --name=seq --rw=write --bs=1M --size=4G --numjobs=1 --directory=/shared/bench
+
+# metadata path: many tiny files
+fio --name=meta --rw=randwrite --bs=4k --size=64M --nrfiles=20000 \
+    --file_service_type=random --directory=/shared/bench
+```
+
+Watch throughput collapse on the second even though total bytes moved are trivial. Then explain, out loud, why: the first is bandwidth-bound on the link, the second is round-trip-bound on metadata operations, and no amount of extra network bandwidth fixes the second.
+
+### 3b. Inode exhaustion — a filesystem full of nothing
+
+A filesystem can be 3% full by bytes and completely unwritable. Build one deliberately:
+
+```bash
+# a small filesystem with deliberately few inodes
+truncate -s 1G /tmp/small.img
+mkfs.ext4 -N 1024 /tmp/small.img      # only 1024 inodes
+mkdir -p /mnt/small && mount -o loop /tmp/small.img /mnt/small
+
+# now exhaust them
+for i in $(seq 1 2000); do touch /mnt/small/file_$i 2>/dev/null || { echo "died at $i"; break; }; done
+
+df -h  /mnt/small     # plenty of space
+df -i  /mnt/small     # zero inodes free
+```
+
+The error is `ENOSPC` — "No space left on device" — while `df -h` shows the disk nearly empty. Every storage administrator meets this eventually, usually via a user who ran a pipeline that wrote ten million tiny intermediates. Know it before it wakes you up. Then know the follow-up: on ext4, inode count is fixed at `mkfs` time and cannot be grown; on XFS it is dynamic but bounded by `imaxpct`; on ZFS and most parallel filesystems the concept is different again.
+
+### 3c. Small-file storms and why they hurt shared storage
+
+A pipeline that opens 40,000 small files per second is not moving much data — it is issuing 40,000 metadata operations per second, and on a shared filesystem those queue behind everyone else's. Simulate one with `mdtest` (part of the IOR suite) or a simple parallel `find`/`stat` loop, and watch what it does to a *second* client's interactive responsiveness on the same share.
+
+This is why real sites push users toward: tar-and-stage patterns, local scratch for intermediates, container image files instead of unpacked trees, and per-directory file-count limits. It is also why "just add more bandwidth" is the wrong answer and why parallel filesystems put metadata on dedicated servers.
+
+### 3d. Local scratch vs shared storage
+
+Give each compute node a local scratch disk and export a shared filesystem, then run the same workload against both and measure. The lesson is not "local is faster" — it is understanding the tradeoff a scheduler has to mediate:
+
+- **Local scratch:** fast, no contention with other nodes, but invisible to other nodes, lost at job end, and requires an explicit stage-in/stage-out step.
+- **Shared:** visible everywhere, survives the job, but every node's I/O contends with every other node's.
+
+Wire this into SLURM properly: use a prolog/epilog to create and clean a per-job scratch directory, expose it as an environment variable, and write a job script that stages in, computes on local scratch, and stages results out. That workflow *is* the answer to a very common interview question about how you would speed up an I/O-bound cluster workload.
+
+### 3e. Quotas
+
+Set user and group quotas on your shared filesystem, exceed them deliberately, and observe how the failure surfaces to a running job (usually as a write error at an arbitrary point, not a friendly message). Then look at the difference between:
+
+- **User/group quotas** — per-identity limits.
+- **Project or fileset quotas** — per-directory-tree limits, which is what most HPC sites actually want ("this lab gets 50 TB" rather than "this user gets 50 TB").
+- **Soft vs hard limits and grace periods**, and why a soft limit with a grace period is kinder to long-running jobs.
+
+### 3f. Mount failure behavior — the most underrated topic here
+
+Stop the NFS server while a client job is writing. What happens depends entirely on mount options, and this is worth experiencing rather than reading:
+
+- **`hard` (the default):** the client retries **forever**. Your job hangs in uninterruptible sleep (`D` state). It does not fail, it does not error, it does not respond to `SIGKILL`. When the server comes back, the write completes as if nothing happened. This is the right default for data integrity and the reason a storage outage produces a cluster full of unkillable processes.
+- **`soft`:** the client gives up after a timeout and returns an I/O error to the application — which usually means silent data corruption in applications that do not check write return codes. Fast failure, real risk.
+- **`intr`** (largely a no-op on modern kernels, which allow killing on hard mounts under some conditions) and `retrans`/`timeo` tuning shape the middle ground.
+
+Run the experiment both ways. Watch `ps` show `D`-state processes. Try to kill one. Bring the server back and watch the job resume mid-write. You will never again be confused about why a storage blip produces a wave of stuck jobs.
+
+### 3g. NFS consistency semantics
+
+Two clients, one shared file. Write from A, read from B, and measure how long B takes to see the change. That delay is **attribute caching** (`acregmin`/`acregmax`/`actimeo`), and it is why NFS is described as **close-to-open consistent**: guarantees exist between one client closing a file and another opening it, not on arbitrary concurrent access.
+
+Then meet **`ESTALE`**: delete and recreate a file on the server while a client holds it open, and watch "Stale file handle" appear. Understand that an NFS file handle references an inode, not a path — which is exactly why the error exists and why it is not fixable by re-running `ls`.
+
+The practical consequence for HPC: applications that assume POSIX-strict semantics across nodes (many MPI programs writing to one shared output, naive lock files) behave differently on NFS than on a local filesystem or a true parallel filesystem. That difference is a legitimate interview conversation.
+
+### 3h. Parallel filesystems — concepts, then a real one
+
+The concepts first, because they transfer across products:
+
+- **Separated metadata and data paths** — dedicated metadata servers/targets vs object/data servers, precisely because of 3a.
+- **Striping** — one file distributed across many targets so a single file's bandwidth exceeds one server's. Stripe width and stripe size are tunable per file or directory and matter enormously for large sequential I/O.
+- **Failure domains** — what happens when one storage target, one metadata server, or one network path dies; which of those is a full outage and which is a degraded read.
+- **Client-side caching and lock management** — how the filesystem keeps many clients coherent, and what that costs.
+
+Then build one. **BeeGFS runs perfectly well in VMs** and is by far the most approachable parallel filesystem for a lab: separate `mgmtd`, `meta`, and `storage` services (put them on different VMs so the roles are real), plus clients on your compute nodes. Create a directory, set a stripe pattern across two storage targets, write a large file, and confirm with BeeGFS's own tools that it is actually striped. Then kill one storage service and observe exactly which operations still work.
+
+**Lustre** is the other major open option but is substantially heavier to stand up; **IBM Storage Scale (GPFS)** is not practical to distribute for a home lab, but its concepts — filesets, policy-driven ILM, storage pools, NSD servers and failure groups, `mmhealth` — are worth studying because they appear constantly in research-computing job descriptions. Know the vocabulary and the failure-domain model even where you cannot run the product.
+
+### 3i. Benchmark like you mean it
+
+Three tools, three different questions:
+
+- **`fio`** — flexible single-node I/O patterns. Best for "what can this device or mount actually do" under a specific pattern.
+- **`IOR`** — the HPC standard for parallel bandwidth. Runs under MPI across nodes, so it measures aggregate filesystem throughput, not one client's.
+- **`mdtest`** (ships with IOR) — the metadata counterpart: creates, stats, and removals per second across ranks.
+
+Run all three against both your NFS share and (once built) your BeeGFS mount. Record the numbers. The comparison — where NFS holds up fine, and exactly where it falls off — is the empirical backing for "why do parallel filesystems exist," and having your own measurements makes that answer yours rather than recited.
+
+### 3j. Where storage meets the scheduler
+
+Finally, connect the two halves of Stages 2 and 3:
+
+- Nodes with local scratch as a SLURM feature/constraint, so jobs that need it request it.
+- `--tmp` resource requests and what happens when scratch fills.
+- Why staging data close to compute changes job placement decisions, and how a scheduler could (and mostly does not) reason about data locality.
+- What a filesystem outage does to your queue, and how a `HealthCheckProgram` that tests the mount can drain a node *before* jobs land on broken storage.
+
+**Self-test:** Explain the difference between the metadata and data paths, and give an example of a workload that saturates one while barely touching the other. A user reports "disk full" but `df -h` shows 60% free — what do you check and what is your fix? Walk through what happens on a client with a `hard` NFS mount when the server disappears mid-write, and contrast with `soft` — including which one risks data corruption and why. What is close-to-open consistency, and what class of application breaks under it? Why does `ESTALE` happen and why can the application not simply retry the path? What does striping buy you, and what does it cost when a single storage target fails? Given a 40,000-small-files-per-second pipeline, what would you actually change?
+
+## Stage 4 — RDMA, MPI, and GPU Collective Communication  `[Designed]`
+
+This converts "I have heard of RDMA and InfiniBand" into something you have measured. You will not have real RDMA hardware in a typical home lab, but you can build genuine intuition for the concepts and real fluency with the software stack.
+
+1. **OpenMPI under SLURM.** Run the OSU microbenchmarks (`osu_latency`, `osu_bw`, `osu_allreduce`) between compute nodes over plain TCP and record the numbers as a baseline.
+
+2. **Soft-RoCE** — the trick that makes verbs programming possible without special hardware. Any Ethernet NIC can host a software RoCEv2 implementation:
 ```bash
 sudo apt install -y rdma-core ibverbs-utils perftest
 sudo modprobe rdma_rxe
 sudo rdma link add rxe0 type rxe netdev <your-nic>
-ibv_devinfo                     # confirm a real verbs device now exists
-ib_send_bw / ib_write_bw / rping   # run between two nodes
+ibv_devinfo                          # a real verbs device now exists
+rping -s                             # then ib_send_bw / ib_write_bw between two nodes
 ```
-Performance here will actually be worse than plain TCP — this is software emulation, not real hardware acceleration — but that's not the point. The point is direct, hands-on fluency with the verbs API itself: queue pairs, completion queues, memory regions, and the `rdma`/`ibv_*` tooling. Once you've done this, you can speak specifically to what real RDMA hardware changes: kernel bypass, NIC-offloaded transport, true zero-copy transfers.
-3. **Multi-node GPU collective communication.** If you have two GPU-capable machines (a passthrough VM and your daily-driver workstation, for instance), boot both into Linux and try NCCL's `all_reduce_perf` benchmark between them over your regular network. Mixed GPU generations work fine here — NCCL doesn't require identical hardware, though a real training job would be paced by the slower card. Watch the reported bandwidth and learn to read it properly: **algorithm bandwidth (algbw) vs. bus bandwidth (busbw)**, where for an all-reduce operation `busbw = algbw × 2(N−1)/N`. On ordinary gigabit Ethernet you'll watch this pin at roughly 110 MB/s — a direct, felt demonstration of why real GPU training clusters need RDMA fabrics at all.
-4. **Theory worth knowing cold, even without the hardware:** RoCEv2 encapsulates InfiniBand's transport semantics inside UDP; why that historically wants a "lossless" Ethernet fabric; Priority Flow Control and its failure modes (head-of-line blocking, pause storms); ECN and DCQCN as the modern congestion-control answer; why a single elephant flow can defeat ECMP load-hashing and how RDMA transports work around it; ring vs. tree topologies for all-reduce.
-5. **One nuance worth knowing precisely:** GPUDirect RDMA — letting a NIC read/write GPU memory directly — requires data-center-class GPUs. Consumer GeForce cards route that traffic through host system memory instead. Knowing this distinction, and why it exists, is itself a mark of real depth rather than surface familiarity.
-6. **Worthwhile optional spend (~$60–90):** a pair of used older-generation RDMA-capable NICs and a direct-attach cable, connected point-to-point between two machines, gets you genuine hardware verbs performance testing rather than software emulation.
+Performance will be **worse** than plain TCP — this is software emulation, not acceleration — and that is fine. The point is hands-on fluency with the verbs API: queue pairs, completion queues, memory regions, GIDs, and the `rdma`/`ibv_*` tooling. Afterward you can speak specifically to what real hardware changes: kernel bypass, NIC-offloaded transport, true zero-copy.
 
-**Self-test:** Walk through what happens between calling an RDMA "post send" operation and its completion being signaled. Explain InfiniBand's credit-based flow control versus RoCE's PFC/ECN approach — mechanisms and failure modes for each. Given a link speed and node count, compute the theoretical bus bandwidth of a ring all-reduce. Why can't a consumer GPU do GPUDirect RDMA, and what changes on a data-center GPU?
-
-## Stage 4 — Kubernetes with real GPU scheduling
-
-Kubernetes "familiarity" and Kubernetes "I run a GPU-enabled cluster and understand batch scheduling on it" are very different claims in an interview — this stage is how you earn the second one.
-
-- Build with **kubeadm**, not a simplified distribution, at least once — you want to personally touch every component: the container runtime, CNI setup, control-plane initialization, node joining, and recovering from things you've deliberately broken. A CNI choice like **Cilium** (eBPF-based, can replace kube-proxy entirely) is worth using specifically because it generates good "how does this actually work" conversations.
-- **Bring a real GPU into the cluster:** join your passthrough VM as a worker node and install the **NVIDIA GPU Operator** via Helm (with the in-guest driver already installed, disable the operator's own driver management). Schedule a pod requesting a GPU resource and confirm it lands correctly. Then configure **time-slicing** to oversubscribe a single GPU across multiple pods, and be ready to explain the isolation tradeoffs versus MIG (partition-level isolation, available on data-center-class GPUs) and MPS (a different sharing model entirely).
-- **Batch and gang scheduling** — the conceptual bridge between traditional HPC schedulers like SLURM and Kubernetes: install **Kueue**, define a resource quota, and submit jobs that get suspended until admitted. Know **Volcano** by name as the alternative gang-scheduling approach and be able to contrast its model with Kueue's.
-- **Observability:** a Prometheus/Grafana stack with a GPU metrics exporter (DCGM) gives you a real dashboard showing utilization, queue depth, and node health — genuinely useful, and a good centerpiece if you ever need to demonstrate this work.
-- **GPU fleet operations, worth an evening on their own:** `nvidia-smi topo -m` to understand interconnect topology; running a GPU diagnostic and stress tool while watching thermals; learning to read GPU error codes (NVIDIA's XID error taxonomy, for instance) well enough to distinguish "the application misbehaved" from "the GPU needs a reset" from "the hardware needs replacing"; practicing node cordon/drain patterns for planned GPU maintenance.
-- **Optional multi-architecture twist:** if you have any ARM box available, Stage 10 shows how to join it as an arm64 worker — which turns this cluster from single-arch into heterogeneous, and unlocks a class of scheduling and image-management lessons single-arch clusters can't teach.
-
-**Self-test:** Trace a network packet from one pod to another pod on a different node under an eBPF-based CNI — what replaced the traditional kube-proxy path, and how? How does the device plugin API let kubelet discover that a node has GPUs at all? Why does a naive scheduler deadlock on a two-pod MPI job, and how does gang scheduling prevent it? Contrast bin-packing and preemption behavior between a traditional HPC scheduler and the default Kubernetes scheduler. A pod is stuck Pending and requesting a GPU — walk through your full debugging process out loud.
-
-## Stage 5 — Identity, access control, and secure provisioning
-
-Making compute "available securely and conveniently" is a real requirement at any shop running shared research or production infrastructure — this stage builds the identity layer that everything else should depend on.
-
-- Stand up a directory service — **FreeIPA** is a strong choice for a Linux-centric estate: it bundles Kerberos, LDAP, DNS, host-based access control, and sudo rules with a scriptable API. (Samba as an Active Directory-compatible domain controller is the alternative if you specifically want Windows-style AD semantics, or want to practice building a trust relationship between the two — a genuinely impressive pattern if you have time for it.)
-- Enroll every node into the directory; use **automount** maps for home directories rather than static NFS mounts, since that's closer to how real HPC shops manage this at scale.
-- Build access-control rules deliberately, and **test the negative case** — confirm that a user who isn't in the right group is actually denied, not just that authorized users work. That habit alone separates people who've configured access control from people who've verified it.
-- Tie identity to scheduling: a small script that syncs directory groups into SLURM accounting, so who someone is in the directory determines what they can run and how it gets billed/tracked.
-- A useful capstone exercise: build a simple, deliberately boring **onboarding pipeline** — a small service that takes a structured "new user" request, maps a role to the right groups and scheduler account via a policy table, creates the user in your directory, and writes an audit record. It doesn't need to be clever; it needs to demonstrate that you understand identity as the actual control plane for everything else, not an afterthought bolted on last.
-- Prove the whole chain end to end: authenticate with Kerberos, SSH in without a password using that ticket, submit a scheduler job, and confirm the accounting system correctly attributes it to the right account.
-
-**Self-test:** Walk through a Kerberos authentication exchange from initial request to a usable service ticket — what's actually inside a ticket-granting ticket? Trace how a simple `id` command resolves a username, through name service switch and any caching layer, back to the directory. How does ticket-based SSH authentication differ operationally from key-based SSH? Contrast the underlying models of an LDAP/Kerberos-based directory versus Active Directory's SID-based model.
-
-## Stage 6 — Provisioning at depth: network boot and infrastructure-as-code
-
-- Build a real **PXE boot chain**, ideally one that respects UEFI Secure Boot rather than disabling it — this involves a signed shim bootloader, a signed network-bootable GRUB, and serving your kernel/initrd/install image over HTTP rather than TFTP (TFTP chokes badly on anything beyond a tiny file). One classic gotcha worth knowing in advance: cloud-init/autoinstall datasource URLs often contain a semicolon, which GRUB's config parser will interpret as a statement separator unless you quote the whole argument.
-- Pair this with **Ansible** roles for post-boot configuration, so a freshly PXE-installed node ends up fully configured — networking, identity enrollment, scheduler agent, monitoring — with no manual steps.
-- Add **OpenTofu** (or Terraform) to define your VMs declaratively against your hypervisor, so `tofu apply` can create or destroy lab nodes reproducibly. This is genuine infrastructure-as-code practice against real infrastructure, which reads very differently in an interview than "I followed a cloud provider's tutorial."
-- If you dual-home any node onto both your isolated cluster network and your main LAN, watch for the classic multi-homing trap: two default routes fighting each other. Suppressing the second one is a small, specific networking lesson worth having internalized.
-
-**Self-test:** Walk through the PXE boot process end to end — DHCP options, TFTP or HTTP handoff, the shim-to-GRUB-to-kernel chain, and how cloud-init picks up from there. Why must your lab's DHCP server never be reachable from your main home network? What changes about PXE booting when Secure Boot is enforced rather than disabled?
-
-## Stage 7 — Self-hosted object storage
-
-Most research and ML infrastructure eventually needs an S3-compatible object store alongside traditional file storage — this stage builds one from scratch rather than only consuming a cloud provider's.
-
-- Deploy **MinIO** (or a lighter alternative like Garage) backed by real disk — ideally block storage rather than a network filesystem, since object stores generally want the stronger consistency and locking guarantees block storage provides. Know **Ceph's RGW** by name as the answer once you're talking about truly large scale.
-- Practice the object-storage-specific concepts that don't map cleanly onto file storage: bucket versioning, lifecycle rules that expire old object versions automatically, presigned URLs, bucket policies.
-- Point any data-transfer tooling you've built (checksum-verified copy scripts, for instance) at your new endpoint — running your own tools against infrastructure you personally operate is a different kind of understanding than running them against someone else's managed service.
-
-**Self-test:** What is S3's actual consistency model today, as opposed to the "eventually consistent" reputation it still carries from years ago? Why does multipart upload exist, and what do per-part checksums protect against? Contrast erasure coding and simple replication in terms of storage overhead, rebuild cost, and failure-domain tolerance.
-
-## Stage 8 — Boot and firmware security fundamentals
-
-This stage has the best return on unusual effort: almost nobody builds hands-on experience here, and it converts vague resume language like "familiar with Secure Boot/TPM concepts" into something you've actually built and can defend under questioning.
-
-- **Secure Boot and MOK (Machine Owner Key) enrollment.** In a VM with a virtual TPM and OVMF firmware, deliberately try to load an unsigned kernel module under Secure Boot and watch it fail; then generate your own signing key, enroll it via `mokutil`, sign the module yourself, and watch it load. This is exactly the workflow real fleets hit whenever a hardware vendor's driver isn't signed by a recognized authority.
-- **Measured boot with a TPM.** Read PCR (Platform Configuration Register) values and the boot event log; then bind a LUKS-encrypted disk's unlock key to a specific PCR value with `systemd-cryptenroll`, watch it auto-unlock on a normal boot, then deliberately change something that affects that PCR (disabling Secure Boot, for instance) and watch it correctly fall back to a passphrase. Know precisely why you'd bind to a PCR that captures Secure Boot policy state rather than one that captures exact boot-manager binary hashes — one survives routine updates, the other doesn't, and picking the wrong one means bricking your own unlock on the next patch cycle.
-- Be able to state the difference between verified boot and measured boot precisely: **verified boot (Secure Boot) blocks execution of anything unsigned**; **measured boot records hashes of everything executed into the TPM, blocking nothing but enabling later attestation and the sealed-secret pattern above.**
-- **Firmware-level Linux, safely.** You almost certainly cannot and should not try flashing alternative firmware like coreboot onto a real consumer motherboard — real brick risk, no board-level support, not worth it. But you can build and run coreboot for QEMU's emulated hardware with zero risk, and pair it with a minimal Linux-based initramfs (the LinuxBoot approach) that `kexec`s into a full OS — which is a faithful hands-on demonstration of the actual idea: replacing most of a traditional firmware stack with ordinary, auditable Linux plus `kexec`.
-- Know the standard boot-stage vocabulary cold (the stages a traditional UEFI/coreboot firmware stack moves through before handing off to an OS loader), and know where the hardware root of trust actually begins on your platform before any general-purpose CPU code executes at all.
-
-**Self-test:** Narrate power-on to login prompt again, but this time with every verification step named explicitly. Why does a shim bootloader exist, and what specific problem does MOK enrollment solve that vendor-level signing doesn't? Why bind a LUKS unlock to a PCR that reflects Secure Boot policy state rather than exact boot-binary hashes? What does a LinuxBoot-style firmware stack actually replace, and what's the security argument for doing so?
-
-## Stage 9 — Routing and network fabric simulation
-
-- Build a router VM between two of your virtual network segments; carve VLANs and practice inter-VLAN routing; add a second router VM and bring up OSPF between them. If you want to go further, a tool like containerlab lets you spin up a disposable multi-node routing topology on your workstation for practicing things like ECMP load-hashing behavior, which connects directly back to the RDMA/congestion-control material in Stage 3.
-
-**Self-test:** Why did BGP become the dominant protocol for large datacenter network fabrics rather than a purely IGP-based design? Where do the Layer 2/Layer 3 boundaries sit in a typical leaf-spine topology, and why there specifically?
-
-## Stage 10 — Optional: A Heterogeneous ARM Node (Worked Example: an Apple Silicon Mac Mini)
-
-Real fleets are increasingly multi-architecture — AWS Graviton, NVIDIA Grace, Ampere Altra — and "our software ran fine until the ARM nodes arrived" is a genuinely common operational story now. If you have any ARM box on your network, you can fold it into this lab and learn that whole lesson class first-hand. The worked example here is an M1 Mac mini with 16 GB RAM used as a part-time auxiliary node.
-
-**Prepare the machine so you never touch it physically again.** On macOS: enable **Remote Login** (SSH) and **Screen Sharing** in System Settings → Sharing — after this, everything else can happen over SSH. Then stop it from sleeping out from under your cluster, which is the number-one way a part-time machine sabotages a lab: `sudo pmset -a sleep 0` (and `sudo pmset -a autorestart 1` so it survives power blips). Since it may remain a part-time machine, cap the lab VM at roughly half the machine's cores and RAM, and stop the VM whenever the hardware is needed elsewhere — a node that comes and goes is *itself* useful practice in drain/cordon discipline.
-
-**The Linux VM does the real work.** macOS can't natively be a SLURM or Kubernetes node — no Linux kernel, no cgroups — so the pattern is one Ubuntu Server **arm64** VM. Two good free options: **UTM** (GUI, Apple Virtualization backend, and — critically — bridged networking is a simple dropdown) or **Lima** (CLI-first and scriptable, but note that bridged networking requires installing `socket_vmnet` separately; its default user-mode networking makes the VM unreachable from the rest of your LAN, which defeats the purpose here). Give the VM a bridged LAN address and reserve it in your router.
-
-**Routing it to the cluster network.** The cluster lives on 10.10.0.0/24 behind head1, so two small pieces of plumbing:
-
+3. **Multi-node GPU collectives.** With two GPU-capable machines (a passthrough VM and your workstation, for instance), boot both into Linux and run NCCL's `all_reduce_perf` between them:
 ```bash
-# In the arm VM (persist via netplan):
-sudo ip route add 10.10.0.0/24 via <head1-LAN-IP>
+NCCL_SOCKET_IFNAME=<nic> NCCL_DEBUG=INFO \
+mpirun -np 2 -H hostA,hostB ./build/all_reduce_perf -b 8 -e 1G -f 2 -g 1
+```
+Mixed GPU generations work — NCCL does not require identical hardware, though a real training job would be paced by the slower card. Read the output properly: **algorithm bandwidth (algbw) vs bus bandwidth (busbw)**, where for all-reduce `busbw = algbw × 2(N−1)/N`. On ordinary gigabit you will watch it pin near 110 MB/s — a felt demonstration of why GPU training clusters need RDMA fabrics. Finish with a small PyTorch DDP run across both hosts: a real all-reduce inside a real training loop, with `NCCL_DEBUG=INFO` showing ring construction and chosen transport.
+
+4. **Theory worth knowing cold:** RoCEv2 encapsulates InfiniBand transport semantics in UDP; why that historically wants a lossless fabric; Priority Flow Control and its failure modes (head-of-line blocking, pause storms, deadlock); ECN and DCQCN as the modern congestion-control answer; why a single large flow defeats ECMP hashing and how RDMA transports work around it; ring vs tree all-reduce; in-network reduction on InfiniBand.
+
+5. **One nuance worth stating precisely:** GPUDirect RDMA — letting a NIC read and write GPU memory directly — requires data-center-class GPUs. Consumer GeForce cards route that traffic through host system memory instead. Knowing this distinction, and why it exists, marks real depth.
+
+6. **Optional spend (~$60–90):** a pair of used older-generation RDMA-capable NICs and a direct-attach cable, connected point-to-point, gets you genuine hardware verbs performance instead of software emulation. The single best money this lab can absorb.
+
+**Self-test:** Walk through what happens between posting an RDMA send and its completion being signaled. Contrast InfiniBand's credit-based flow control with RoCE's PFC/ECN approach — mechanisms and failure modes for each. Given a link speed and node count, compute the theoretical bus bandwidth of a ring all-reduce. Why can a consumer GPU not do GPUDirect RDMA, and what changes on a data-center card?
+
+## Stage 5 — Kubernetes with Real GPU Scheduling  `[Designed]`
+
+Kubernetes "familiarity" and "I run a GPU-enabled cluster and understand batch scheduling on it" are very different claims in an interview. This stage earns the second.
+
+- Build with **kubeadm**, not a simplified distribution, at least once — touch every component: container runtime, CNI, control-plane init, node joining, and recovery from things you break on purpose. A CNI like **Cilium** (eBPF-based, can replace kube-proxy) is worth choosing specifically because it generates good "how does this actually work" conversations.
+- **Bring a real GPU in:** join your passthrough VM as a worker and install the **NVIDIA GPU Operator** via Helm (with the in-guest driver already present, disable the operator's driver management). Schedule a pod requesting a GPU resource. Then configure **time-slicing** to oversubscribe one GPU across pods, and be ready to explain the isolation tradeoffs versus MIG (hardware-partitioned, data-center GPUs only) and MPS (a different sharing model again).
+
+> **Hardware compatibility checkpoint.** The GPU Operator and DCGM are built, documented, and tested against **data-center GPUs and data-center driver branches**. On consumer GeForce hardware (a 2080 Ti or 4090, as in this lab) parts of the stack work and parts may not — the device plugin generally functions, while DCGM's richer telemetry and diagnostics are neither guaranteed nor supported. Treat this path as an experiment with a fallback, not a prescription. **If the operator or DCGM misbehaves on your card, do not lose the stage to it:** fall back to installing the NVIDIA device plugin alone, and gather metrics from `nvidia-smi`/NVML through a lightweight exporter instead. You will still learn the scheduling, admission, and quota lessons, which are the transferable part. Being able to *explain* this consumer-vs-data-center split is itself a strong interview signal.
+
+- **Batch and gang scheduling** — the conceptual bridge from HPC schedulers to Kubernetes: install **Kueue**, define a ClusterQueue with CPU/memory/GPU quotas and a LocalQueue, submit jobs, and watch suspension and admission. Know **Volcano** by name and be able to contrast its PodGroup gang model with Kueue's quota-and-admit model.
+- **Observability:** a Prometheus and Grafana stack with node and GPU metrics gives you a real dashboard of utilization, queue depth, and node health — useful in itself and a good demonstration centerpiece.
+- **GPU fleet operations, worth an evening:** `nvidia-smi topo -m` and what the interconnect codes mean; running a GPU stress tool while watching thermals; reading vendor GPU error codes (NVIDIA's XID taxonomy) well enough to distinguish "the application misbehaved" from "reset the GPU" from "replace the hardware"; cordon and drain patterns for planned GPU maintenance.
+
+**Self-test:** Trace a packet from one pod to a pod on another node under an eBPF-based CNI — what replaced the traditional kube-proxy path? How does the device plugin API let kubelet discover GPUs? Why does a naive scheduler deadlock a two-pod MPI job, and how does gang scheduling prevent it? Contrast bin-packing and preemption between an HPC scheduler and the default Kubernetes scheduler. A GPU pod is stuck Pending — walk your full debugging tree out loud.
+
+## Stage 6 — Identity, Access Control, and Secure Provisioning  `[Designed]`
+
+Making compute available "securely and conveniently" is a real requirement anywhere shared infrastructure exists. This stage builds the identity layer everything else should depend on.
+
+- Stand up a directory service — **FreeIPA** suits a Linux-centric estate, bundling Kerberos, LDAP, DNS, host-based access control, and sudo rules behind a scriptable API. (Samba as an AD-compatible domain controller is the alternative if you want Windows-style semantics, or want to practice a trust relationship between the two.)
+- Enroll every node; use **automount** maps for home directories rather than static mounts, since that is closer to real HPC practice.
+- Build access rules deliberately and **test the negative case** — confirm that a user outside the right group is actually denied, not merely that authorized users succeed. That habit separates people who configure access control from people who verify it.
+- Tie identity to scheduling: sync directory groups into SLURM accounting, so who someone is determines what they can run and how it is tracked.
+- A useful capstone: a deliberately boring **onboarding pipeline** — a small service that takes a structured "new user" request, maps a role to groups and a scheduler account via a policy table, creates the user, and writes an audit record. It does not need to be clever; it needs to show you understand identity as the control plane rather than an afterthought.
+- Prove the chain end to end: authenticate with Kerberos, SSH in with no password using that ticket, submit a job, and confirm accounting attributes it correctly.
+
+**Self-test:** Walk a Kerberos exchange from initial request to usable service ticket — what is inside a ticket-granting ticket? Trace how `id` resolves a username through the name service switch and any caching layer back to the directory. How does ticket-based SSH differ operationally from key-based? What is the failure mode when clocks drift between client and KDC? Contrast an LDAP/Kerberos directory's model with Active Directory's.
+
+## Stage 7 — Network Boot and Infrastructure as Code  `[Designed]`
+
+- Build a real **PXE boot chain**, ideally one that respects UEFI Secure Boot rather than disabling it: a signed shim, a signed network-bootable GRUB, and kernel/initrd/image served over HTTP rather than TFTP (which chokes on anything large). One gotcha worth knowing in advance: autoinstall datasource URLs often contain a semicolon, which GRUB's parser treats as a statement separator unless the whole argument is quoted.
+- Pair it with **Ansible** roles so a freshly network-installed node ends up fully configured — networking, identity enrollment, scheduler agent, monitoring — with no manual steps.
+- Add **OpenTofu** (or Terraform) to define VMs declaratively against your hypervisor, so a single apply creates or destroys lab nodes reproducibly. This is real infrastructure-as-code practice against real infrastructure, which reads very differently from a cloud tutorial.
+- If you dual-home any node across both networks, watch for the classic multi-homing trap: two default routes competing. Suppressing the second is a small, specific lesson worth internalizing.
+
+**Self-test:** Walk the PXE process end to end — DHCP options, TFTP or HTTP handoff, the shim-to-GRUB-to-kernel chain, and where cloud-init takes over. Why must your lab's DHCP server never be reachable from your home network? What changes about PXE when Secure Boot is enforced rather than disabled?
+
+## Stage 8 — Self-Hosted Object Storage  `[Planned]`
+
+Most research and ML infrastructure eventually needs an S3-compatible object store alongside file storage. Build one rather than only consuming a cloud provider's.
+
+- Deploy **MinIO** (or a lighter alternative like Garage) backed by real block storage rather than a network filesystem — object stores generally want the stronger consistency and locking guarantees block storage provides, and knowing *why* that recommendation exists is the interview-grade part. Know **Ceph RGW** by name as the large-scale answer.
+- Practice the concepts that do not map onto file storage: bucket versioning, lifecycle rules that expire old versions, presigned URLs, bucket policies.
+- Point any data-transfer tooling you have built at your own endpoint. Running your own tools against infrastructure you operate is a different kind of understanding than running them against a managed service.
+
+**Self-test:** What is S3's actual consistency model today, versus the "eventually consistent" reputation it carries from years ago? Why does multipart upload exist and what do per-part checksums protect against? Contrast erasure coding and replication in storage overhead, rebuild cost, and failure-domain tolerance. What breaks when an application assumes POSIX semantics against an object store?
+
+## Stage 9 — Boot and Firmware Security  `[Planned]`
+
+The best return on unusual effort: almost nobody builds hands-on experience here, so it converts vague "familiar with Secure Boot and TPM concepts" into something you have actually done.
+
+- **Secure Boot and MOK enrollment.** In a VM with a virtual TPM and OVMF firmware, try to load an unsigned kernel module under Secure Boot and watch it be refused; then generate your own key, enroll it with `mokutil`, sign the module, and watch it load. This is exactly the workflow real fleets hit whenever a vendor driver is not signed by a recognized authority.
+- **Measured boot with a TPM.** Read PCR values and the boot event log; then bind a LUKS volume's unlock key to a PCR with `systemd-cryptenroll`, watch it auto-unlock, then deliberately change something that affects that PCR and watch it fall back to a passphrase. Understand why binding to a PCR that reflects **Secure Boot policy state** survives routine updates while binding to exact boot-binary hashes does not — choosing wrong means bricking your own unlock on the next kernel patch.
+- **State the two mechanisms precisely**, because loose phrasing gets picked apart in interviews:
+  - **Verified boot (Secure Boot)** validates signatures along the **boot chain** — firmware, bootloader, kernel, and (subject to kernel lockdown policy) kernel modules — and refuses to execute components that fail validation. It does **not** cryptographically approve every user-space binary you later run.
+  - **Measured boot** records **defined boot events and component measurements** into TPM PCRs together with an event log. It blocks nothing; it produces an audit trail that supports remote attestation and sealed secrets. It does not hash everything the machine ever executes.
+- **Firmware-level Linux, safely.** Do not attempt to flash alternative firmware onto a consumer motherboard — real brick risk, no board support, and saying exactly that is the senior answer. But you can build coreboot for QEMU's emulated hardware with zero risk, and pair it with a minimal Linux-based initramfs (the LinuxBoot approach) that `kexec`s into a full OS — a faithful demonstration of replacing most of a traditional firmware stack with auditable Linux plus `kexec`.
+- Know the standard boot-stage vocabulary, and know where the hardware root of trust actually begins on your platform before any general-purpose CPU code runs.
+
+**Self-test:** Narrate power-on to login prompt again, this time naming every verification step and being precise about what is and is not verified. Why does a shim bootloader exist, and what problem does MOK enrollment solve that vendor signing does not? Why bind a LUKS unlock to Secure Boot policy state rather than exact binary hashes? What does a LinuxBoot-style stack replace, and what is the security argument for it?
+
+## Stage 10 — Routing and Fabric Simulation  `[Planned]`
+
+Build a router VM between two virtual network segments; carve VLANs and practice inter-VLAN routing; add a second router and bring up OSPF between them. A tool like containerlab lets you spin up a disposable multi-node routing topology on your workstation for practicing ECMP hashing behavior, which connects directly back to Stage 4's congestion-control material.
+
+**Self-test:** Why did BGP become dominant for large datacenter fabrics rather than a purely IGP-based design? Where do the Layer 2 and Layer 3 boundaries sit in a leaf-spine topology, and why there specifically? What does PFC do to a leaf-spine under incast?
+
+## Stage 11 — Optional: A Heterogeneous ARM Node  `[Planned]`
+
+Real fleets are increasingly multi-architecture, and "our software ran fine until the ARM nodes arrived" is a common operational story. Any ARM box on your network can teach that whole lesson class. The worked example here is an Apple Silicon Mac mini that keeps its day job as a home-theater machine.
+
+**Prepare it so you never touch it physically again.** On macOS, enable Remote Login and Screen Sharing. Then stop it sleeping out from under your cluster — the single most likely way a part-time node sabotages a lab:
+```bash
+sudo pmset -a sleep 0
+sudo pmset -a autorestart 1
 ```
 
-And on head1, make sure your NAT rule only masquerades traffic actually leaving for the internet — not east-west traffic between the cluster and your LAN:
+**A Linux VM does the real work** — macOS cannot be a SLURM or Kubernetes node itself (no Linux kernel, no cgroups). Use **UTM** (GUI, Apple Virtualization backend, bridged networking is a dropdown) or **Lima** (scriptable, but its default user-mode networking leaves the VM unreachable from the rest of the LAN — install `socket_vmnet` or the exercise fails at step one). Bridge it to your LAN and reserve its address.
 
-```
-ip saddr 10.10.0.0/24 ip daddr != <your-LAN-subnet> masquerade
-```
+**Route it to the cluster network** with a static route via your head node, and make sure the head node's NAT rule only masquerades traffic actually leaving for the internet — not east-west traffic between the cluster and your LAN. If it NATs everything, every cluster node appears to the ARM VM as the head node's address, which breaks direct addressing and any CNI tunnel expecting real node IPs. "Only NAT what is leaving the building" is a real router discipline, learned here in miniature.
 
-Why this matters: if head1 source-NATs cluster-to-LAN traffic, every cluster node appears to the arm VM as head1's address, which breaks direct node-to-node communication — Kubernetes CNI tunnels especially. "Only NAT what's leaving the building" is a classic real-world router discipline, learned here in miniature.
+**In SLURM:** install the scheduler agent, match versions with your controller, and define the node with an architecture feature and its own partition. Then run the most instructive demo of the stage: compile a hello-world on an x86 node, submit it to the ARM partition, and watch it die with **`Exec format error`**. That single error is the entire reason heterogeneous sites maintain per-architecture software trees — then extend your module path to include the architecture so each resolves its own builds.
 
-**Fold it into SLURM.** Ubuntu packages SLURM for arm64, so: install `slurm-wlm` in the VM, copy over the munge key and `slurm.conf`, and define it as its own partition — `NodeName=arm-node1 ... Feature=aarch64` with `PartitionName=arm Nodes=arm-node1`. (Keep SLURM versions matched between controller and this node; cross-distro version skew is a real compatibility constraint.) Then run the single most instructive demo this stage offers: compile a hello-world on an x86 node, `srun -p arm ./hello`, and watch it die with **`Exec format error`**. That one error is the entire reason real heterogeneous shops maintain per-architecture software trees — and now you can make your Lmod `MODULEPATH` include `$(uname -m)` so each architecture resolves its own builds, exactly as production sites do.
+**In Kubernetes:** a standard join adds it as a worker. Then: schedule onto it deliberately with a `nodeSelector` on architecture; push an amd64-only image at it and observe the failure (either a pull-time "no matching manifest" or a container that starts and immediately exec-format-errors, depending on how the image was built); fix it properly with a multi-architecture manifest via `docker buildx`; and optionally taint the node so only workloads that tolerate ARM land there — the polite pattern for a part-time node.
 
-**Fold it into Kubernetes.** kubelet/kubeadm ship for arm64, so a standard `kubeadm join` adds it as a worker. Confirm with `kubectl get nodes -L kubernetes.io/arch` — you now run a genuinely heterogeneous cluster. The lessons that only exist now: schedule onto it deliberately with a `nodeSelector` on `kubernetes.io/arch`; watch what happens when a pod lands there with an **amd64-only image** (either an immediate "no matching manifest for linux/arm64" pull failure, or — if a single-arch image sneaks through — a container that starts and instantly dies with exec format errors); then fix it properly by building a **multi-arch manifest** (`docker buildx build --platform linux/amd64,linux/arm64 ...`). Optionally taint the node so only workloads that explicitly tolerate ARM land on it — the polite pattern for a part-time node. One Apple-specific flourish if you used the Virtualization backend: Rosetta can be exposed *inside* the Linux VM, letting the arm node execute amd64 Linux binaries via translation — a fun demonstration, though the real lesson is building multi-arch images correctly, not translating around single-arch ones.
+**Honest limits:** an Apple GPU speaks Metal, not CUDA, so this node adds *architecture* diversity, not GPU capacity, and never participates in Stage 4's NCCL work. Throughput is modest and availability is part-time. None of that matters for what it teaches.
 
-**Honest limits, stated up front:** the M1's GPU speaks Metal, not CUDA — this node adds *architecture* diversity, not GPU capacity, and it will never participate in the NCCL work from Stage 3. Its throughput is modest and its availability is part-time. None of that matters: what it teaches — image manifests, per-arch software management, constraint-based scheduling, a node that joins and leaves — is exactly the operational texture single-architecture labs can't produce. A spare display can also make a useful always-on status dashboard once the monitoring stage exists.
-
-**Self-test:** At exactly what layer does an amd64-only workload fail on an arm64 node — and why are there two different failure modes depending on how the image was built and pulled? What is a multi-arch manifest list, and how does a container runtime resolve the right image from it? Compare SLURM's `Feature`/`--constraint` mechanism with Kubernetes' node labels and `nodeSelector` — same idea, different ecosystems; where do they differ? Why do heterogeneous HPC sites maintain per-architecture software trees rather than relying on emulation?
+**Self-test:** At exactly what layer does an amd64-only workload fail on an arm64 node, and why are there two different failure modes depending on how the image was built versus pulled? What is a multi-architecture manifest list and how does a runtime resolve it? Compare SLURM's feature/constraint mechanism with Kubernetes node labels and selectors — same idea, different ecosystems; where do they diverge?
 
 ---
 
-# Part C — Putting It All Together: A Signature End-to-End Demo
+# Part C — The Signature End-to-End Demonstration
 
-Once several stages are built, wire them into one coherent demonstration — this is worth far more than the sum of its parts, because it proves you understand how the pieces actually fit together, not just each piece in isolation.
+Once several stages exist, wire them into one coherent chain. This is worth far more than the sum of its parts, because it proves you understand how the pieces fit rather than each piece in isolation — and because it is the thing you can narrate in an interview while someone interrupts you with questions.
 
-A reasonable shape for this: an infrastructure-as-code command builds a new compute node from nothing → a simple onboarding request creates a real user in your directory service with the correct group memberships → that user authenticates with a Kerberos ticket and submits a real job to your scheduler → the job lands on your GPU node, properly fenced by cgroups → a dashboard shows the utilization and the accounting system shows correct attribution → the same infrastructure-as-code tooling tears the node back down.
+A reasonable shape:
 
-Each stage above feeds one link in that chain. Rehearse narrating it end to end until you could do it live, under questions, without losing the thread.
+| # | Beat | What it proves |
+|---|---|---|
+| 1 | An infrastructure-as-code apply builds a new compute node from nothing; it network-boots and joins the cluster unattended | provisioning and IaC (Stage 7) |
+| 2 | An onboarding request creates a real directory user with correct group memberships and a scheduler account | identity as control plane (Stage 6) |
+| 3 | That user authenticates with a Kerberos ticket and SSHes in with no password | authentication chain (Stage 6) |
+| 4 | They submit a job that stages data to local scratch, computes, and stages results back to shared storage | storage-aware workflow (Stage 3) |
+| 5 | The job lands on the GPU node, correctly fenced by cgroups | scheduling and enforcement (Stages 2, 5) |
+| 6 | A dashboard shows utilization; accounting shows correct attribution | observability and accounting (Stages 2, 5) |
+| 7 | The same tooling tears the node back down | full lifecycle, cattle not pets |
+
+Rehearse narrating it end to end until you can hold the thread under questioning. If an interviewer stops you at any beat and digs, the corresponding stage's self-test questions are your preparation for exactly that.
 
 ---
 
 # Appendices
 
-## A. A Reasonable Pacing Guide
+## A. Pacing
 
-There's no single correct pace — go faster if a stage is already close to your existing experience, slower where it's genuinely new. As a rough shape for someone working evenings and weekends:
+No single correct pace — go faster where a stage is close to your existing experience, slower where it is genuinely new. A rough shape for evenings and weekends:
 
-| Stage(s) | Time |
+| Stage | Time |
 |---|---|
-| Hypervisor build (Part A) | 1 week |
-| Stage 1 (fundamentals) | ongoing throughout — never really "done" |
-| Stage 2 (SLURM cluster) | 1–2 weeks |
-| Stage 3 (RDMA/MPI/NCCL) | 2–3 weeks |
-| Stage 4 (Kubernetes + GPU) | 2–3 weeks |
-| Stage 5 (identity) | 1–2 weeks |
-| Stage 6 (PXE + IaC) | 1–2 weeks |
-| Stage 7 (object storage) | a few evenings |
-| Stage 8 (boot/firmware security) | ongoing background, alongside everything else |
-| Stage 9 (routing) | ongoing background |
-| Stage 10 (ARM node, optional) | a weekend — best done alongside or after Stages 2 and 4 |
+| Part A — hypervisor build (A1–A11) | 1 week, including a dedicated evening for A9 (GPU passthrough) |
+| Stage 1 — fundamentals | ongoing throughout; never really "done" |
+| Stage 2 — SLURM build and operations | 2–3 weeks (2a builds it; 2b is where the depth is) |
+| Stage 3 — storage | 2 weeks |
+| Stage 4 — RDMA/MPI/NCCL | 2–3 weeks |
+| Stage 5 — Kubernetes and GPU | 2–3 weeks |
+| Stage 6 — identity | 1–2 weeks |
+| Stage 7 — PXE and IaC | 1–2 weeks |
+| Stage 8 — object storage | a few evenings |
+| Stage 9 — boot and firmware security | ongoing background |
+| Stage 10 — routing | ongoing background |
+| Stage 11 — ARM node (optional) | a weekend, best after Stages 2 and 5 |
 
-## B. Break-Glass Cheatsheet (Recovery Moves Worth Knowing Before You Need Them)
+## B. Break-Glass Cheatsheet
 
-- Black screen right after kernel handoff → boot menu, `e`, append `nomodeset` → once confirmed, persist it properly in your bootloader's config.
-- Console lost to GPU passthrough → boot menu edit, append `modprobe.blacklist=vfio_pci` for that one boot → normal display driver takes back over.
-- A cmdline edit "didn't take" → you likely edited the wrong bootloader's config file, or forgot to run the apply step (`proxmox-boot-tool refresh` for systemd-boot, `update-grub` for GRUB) — check which one you're actually running first.
-- Two ZFS pools with the same name both importable at boot → this is why a second drive with an old install gets wiped (label-cleared, not just partition-deleted) before it's ever powered on alongside a fresh install.
-- Stale UEFI boot entries cluttering the boot menu → `efibootmgr -v` to list, `-b XXXX -B` to delete a specific one, `-o` to set your preferred order.
-- Genuinely stuck at a GRUB rescue prompt → `set prefix=(hd0,gpt2)/boot/grub`, `insmod normal`, `normal` — gets you back to a real menu you can fix from.
-- A VM locked after a failed backup operation → unlock it explicitly rather than fighting it manually.
-- Anything truly unrecoverable → this is exactly why you rehearsed a restore in Part A. A backup that's never been tested is a hope, not a plan.
+Recovery moves worth knowing *before* you need them:
+
+- **Black screen right after kernel handoff** → at the boot menu, `e`, append `nomodeset`; once confirmed, persist it in your bootloader's config and re-apply (A3).
+- **Console lost to GPU passthrough** → boot-menu edit, append `modprobe.blacklist=vfio_pci` for one boot; the normal display driver takes back over (A9).
+- **A cmdline edit "did not take"** → you edited the wrong bootloader's file, or skipped the apply step. `proxmox-boot-tool status` settles which one you are on; remember it reports `uefi` for systemd-boot.
+- **Two ZFS pools with the same name importable at boot** → the reason a second drive gets label-cleared (not merely partition-deleted) *before* it is ever powered on beside a fresh install (A4). If you are already at the initramfs prompt: `zpool import` to list numeric IDs, then `zpool import -N <id> rpool` and `exit`.
+- **Stale UEFI boot entries** → `efibootmgr -v` to list, `-b XXXX -B` to delete, `-o` to reorder (A3).
+- **Stuck at a GRUB rescue prompt** → `set prefix=(hd0,gpt2)/boot/grub`, `insmod normal`, `normal`.
+- **Jobs hung in `D` state after a storage blip** → expected behavior on a `hard` NFS mount; they are waiting, not dead, and will resume when the server returns (Stage 3f). Killing them is not the fix; restoring the server is.
+- **"No space left on device" with free space showing** → inodes, not bytes. `df -i` (Stage 3b).
+- **A VM locked after a failed backup** → unlock it explicitly rather than fighting it manually.
+- **Anything genuinely unrecoverable** → this is why you rehearsed a restore in A11. A backup that has never been tested is a hope, not a plan.
 
 ## C. Reading List
 
-LLNL's MPI tutorials remain a genuinely excellent free resource. The OSU microbenchmark documentation and the NCCL/`nccl-tests` documentation are worth reading directly rather than only through summaries — the bus-bandwidth math in particular is explained clearly in the primary sources. NVIDIA's GPU Operator documentation, the Kueue project docs, and FreeIPA/RHEL Identity Management documentation are all worth working through directly. On the networking-theory side: the original DCQCN congestion-control paper (SIGCOMM 2015) and the "RDMA over Commodity Ethernet at Scale" paper (SIGCOMM 2016) are both approachable and foundational. The coreboot project's own documentation and the u-root/LinuxBoot project pages are the best primary sources for that stage.
+LLNL's MPI tutorials remain an excellent free resource. The OSU microbenchmark and NCCL/`nccl-tests` documentation are worth reading directly — the bus-bandwidth math in particular is explained clearly in the primary sources. For storage: the IOR and mdtest documentation, the BeeGFS administration guide, and any vendor's parallel-filesystem architecture overview (they are more candid about failure domains than you might expect). SchedMD's own `slurm.conf` and `cgroup.conf` documentation is the authoritative source for Stage 2 and repays close reading. NVIDIA's GPU Operator platform-support page is where to check hardware compatibility claims for Stage 5. Kubernetes and Kueue documentation, and FreeIPA/RHEL Identity Management documentation, cover Stages 5 and 6. On networking theory, the DCQCN congestion-control paper (SIGCOMM 2015) and "RDMA over Commodity Ethernet at Scale" (SIGCOMM 2016) are both approachable and foundational. The coreboot project documentation and the u-root/LinuxBoot pages are the best primary sources for Stage 9.
 
-## D. A Note on Cost
+## D. Cost
 
-Everything in this guide is achievable with free and open-source software on hardware you likely already own. If you do want to spend anything, the single best-value purchase for the RDMA stage is a pair of used older-generation RDMA-capable network cards and a direct-attach cable — often findable secondhand for well under $100 — which upgrades that entire stage from software emulation to genuine hardware verbs testing.
+Everything here is achievable with free and open-source software on hardware you likely already own. If you want to spend anything, the best value by a wide margin is a pair of used older-generation RDMA-capable network cards and a direct-attach cable — often well under $100 secondhand — which upgrades Stage 4 from software emulation to genuine hardware verbs testing. A spare SSD for dual-booting your workstation is the second-best purchase, since multi-node GPU work needs bare-metal Linux.
+
+---
+
+*This guide is a living document. Stages marked Designed or Planned will be promoted to Validated as they are built and their failure paths verified.*
