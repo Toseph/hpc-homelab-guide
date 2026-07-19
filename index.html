@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#0f172a">
-    <meta name="description" content="A readable v4 homelab guide for practicing senior Linux, HPC, SRE, Proxmox, SLURM, Kubernetes, storage, identity, and boot security skills.">
-    <title>Senior Linux & HPC Homelab Study Guide</title>
+    <meta name="description" content="Version 4.0.1 of a readable homelab guide for practicing senior Linux, HPC, SRE, Proxmox, SLURM, Kubernetes, storage, identity, and boot security skills.">
+    <title>Senior Linux & HPC Homelab Study Guide v4.0.1</title>
     <style>
         :root {
             --bg-color: #0f172a;
@@ -126,6 +126,23 @@
 
         .tagline span {
             color: var(--accent-green);
+        }
+
+        .doc-version {
+            display: inline-flex;
+            align-items: center;
+            width: fit-content;
+            margin-top: 1rem;
+            padding: 0.32rem 0.62rem;
+            border: 1px solid rgba(34, 197, 94, 0.45);
+            border-radius: 0.45rem;
+            background: rgba(34, 197, 94, 0.08);
+            color: #bbf7d0;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
         }
 
         .header-actions {
@@ -445,7 +462,7 @@
     <div class="container">
         <div class="status-bar">
             <span>HOST homelab.automatictoaster.com</span>
-            <span class="status-online">GUIDE STATUS: ONLINE</span>
+            <span class="status-online">GUIDE VERSION: 4.0.1</span>
         </div>
 
         <header>
@@ -453,6 +470,8 @@
                 <div class="logo-mark" aria-hidden="true">AT</div>
                 <h1>Senior Linux & HPC Homelab Study Guide</h1>
             </div>
+
+            <div class="doc-version">Version 4.0.1</div>
 
             <div class="tagline">
                 A hands-on v4 path for practicing Linux, Proxmox, SLURM, Kubernetes,

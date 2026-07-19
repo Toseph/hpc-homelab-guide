@@ -1,5 +1,7 @@
 # Senior Linux Admin & HPC Homelab Study Guide
 
+**Version:** 4.0.1
+
 A from-scratch, hands-on path for practicing the systems engineering skills that senior Linux, HPC, and SRE roles actually test: Linux fundamentals, scheduler operations, parallel and shared storage, GPU scheduling, Kubernetes, RDMA/MPI concepts, identity, and boot/firmware internals — on two consumer machines and a NAS you may already own.
 
 This is a build log turned into a curriculum, including the mistakes, because the mistakes are usually the most instructive part. If you are preparing for interviews in this space, treat each stage's closing questions as a self-test: can you explain this out loud, from memory, to someone who will push back?
